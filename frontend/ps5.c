@@ -290,3 +290,15 @@ int ps5_find_files(const char **rom, const char **module, int want_module)
 #else
 typedef int ct_ps5_unused;   /* ISO C: no empty translation unit */
 #endif /* CT_PS5 */
+
+/* port: the title's own (title.c) replaces this; elsewhere nothing to say */
+__attribute__((weak)) void ps5_dir_status(int out[3])
+{
+    out[0] = out[1] = out[2] = 0;
+}
+
+__attribute__((weak)) const unsigned char *ps5_dir_peek(void)
+{
+    static const unsigned char none[48];
+    return none;
+}

@@ -176,6 +176,12 @@ static void test_sprites(void)
         oam[2 * e] = 0xF0 << 8;   /* hidden */
     /* Entry 3: 16x16 at screen (40, 60); its object's position says
        (48, 74), but the foot is the entries' own bottom row (76). */
+    /* its four 8x8 characters (2, 3, 18, 19) have pixels to their bottom row */
+    for (int k = 0; k < 16; k++) {
+        vram[0x1000 + 3 * 16 + k] = 0x4242;
+        vram[0x1000 + 18 * 16 + k] = 0x4242;
+        vram[0x1000 + 19 * 16 + k] = 0x4242;
+    }
     oam[2 * 3] = (uint16_t)(60 << 8 | 40);
     oam[2 * 3 + 1] = 0x0002;
     oam[0x100 + 0] = 2 << 6;      /* entry 3: large */

@@ -225,11 +225,15 @@ static void draw_line(const ct_text_line *ln, const line_place *p, const sched_v
         draw_glyph(pl[k].ch, pl[k].x, by, pl[k].sx, sc, 0, 0, fg);
 }
 
+static int removed_valid;   /* port: mask holds this frame's removed glyph pixels */
+const uint8_t *hdtext_removed(void) { return removed_valid ? mask : NULL; }
+
 int hdtext_frame(const ct_text *t, const sched_prov_px *prov, const sched_vmem *m,
                  int brightness, const uint8_t *bgrx, const uint8_t *layers, int S,
                  hdtext_result *r)
 {
     memset(r, 0, sizeof *r);
+    removed_valid = 0;
     r->bgrx = bgrx;
     r->layers = layers;
     if (!F.ok || !t || !prov || !m || !t->n_lines)
@@ -412,6 +416,7 @@ int hdtext_frame(const ct_text *t, const sched_prov_px *prov, const sched_vmem *
         }
     r->bgrx = out_px;
     r->layers = out_layers;
+    removed_valid = 1;
 
     /* The overlay: drawn again only when something in it changed. */
     int lines = 0;

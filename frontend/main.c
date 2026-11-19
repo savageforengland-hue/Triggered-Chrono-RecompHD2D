@@ -197,7 +197,7 @@
 #include "interp.h"
 #include "packs.h"    /* port: asset packs (docs/ASSET-PACKS.md) */
 #include "music.h"    /* port: audio packs: [[music]] in the same packs */
-#include "hdtext.h"   /* port: HD text: the player's font over the text boxes */
+#include "hdtext.h"
 #include "pack_scene.h"   /* port: their models, poses and sheets */
 #include "png.h"
 #include "replay.h"
@@ -224,7 +224,14 @@
 /* Device buffer: 960 samples, exactly 20 ms at 48 kHz. Queue target: two
    device buffers plus one frame (800), ~57 ms. */
 #define AUDIO_BUFFER 960
+#ifdef CT_PS5
+/* port: on the PS5 the queue is kept fuller (~107 ms): a frame that runs
+   long at a higher resolution or in the 3D view emptied the shorter one and
+   the music stuttered. */
+#define AUDIO_TARGET (4 * AUDIO_BUFFER + 1280)
+#else
 #define AUDIO_TARGET (2 * AUDIO_BUFFER + 800)
+#endif
 #define AUDIO_MAX_DEV 0.005
 #define FRAME_NS 16639267ull   /* 1 / 60.0988 Hz */
 
@@ -375,7 +382,10 @@ static int running = 1, fast, log_input, log_audio, log_music;
    the per-game data folder, <pref path>/packs/NAME; a NAME with a slash
    in it is a directory of its own. */
 static const char *pack_dump;   /* --pack-dump NAME */
-static int want_prov(void) { return packs_active() || pack_dump || hdtext_ready(); }
+static int want_prov(void)
+{
+    return packs_active() || pack_dump || hdtext_ready();
+}
 static const char *pack_sheets;   /* --pack-export-sheets NAME */
 static int pack_sheets_scale = 4;   /* --pack-export-scale N */
 #define MAX_PACK_NAMES 16
@@ -523,6 +533,24 @@ static void pack_sheets_report(void)
 {
     pack_scene_export_close();
 }
+
+#ifdef CT_PS5
+/* port: the sheet export from the menu (no command line on the console) */
+static int pose_export_on;
+static int get_pose_export(void *u) { (void)u; return pose_export_on || pack_sheets != NULL; }
+static void set_pose_export(void *u, int v)
+{
+    (void)u;
+    if (v && !pose_export_on && !pack_sheets) {
+        pose_export_on = !pack_scene_export_open("/data/ct-recomp/sheets/ct5", 4);
+        ps5_notify(pose_export_on ? "Exporting character poses" : "Cannot write the poses");
+    } else if (!v && pose_export_on) {
+        pack_scene_export_close();
+        pose_export_on = 0;
+        ps5_notify("Character poses saved");
+    }
+}
+#endif
 
 static void pack_dump_report(void)
 {
@@ -1573,6 +1601,15 @@ static const char *packs_count_text(void *u, char *buf, size_t n)
 }
 
 /* The pack rows, rebuilt each time the menu opens (the folder may change). */
+#ifdef CT_PS5
+static char packs_scan_text[160] = "build 32: not checked";
+static const char *packs_scan_get(void *u, char *buf, size_t n)
+{
+    (void)u;
+    snprintf(buf, n, "%s", packs_scan_text);
+    return buf;
+}
+#endif
 static void packs_refresh(void)
 {
     settings_unregister_category("Packs");
@@ -1588,18 +1625,145 @@ static void packs_refresh(void)
 #endif
     }
 #if defined(__unix__) || defined(__APPLE__) || defined(CT_PS5)
+    /* port: a folder is a pack if NAME/pack.toml opens (or NAME/NAME/pack.toml,
+       unzipped a level too deep); no stat(), whose struct differs on the PS5 */
     DIR *d = opendir(packs_folder);
-    struct dirent *e;
-    while (d && (e = readdir(d)))
-        if (e->d_name[0] != '.' && strcmp(e->d_name, "dump")) {
-            char p[1024];
-            struct stat st;
-            snprintf(p, sizeof p, "%s/%s", packs_folder, e->d_name);
-            if (!stat(p, &st) && S_ISDIR(st.st_mode))
-                pack_list_add(e->d_name);
+#ifdef CT_PS5
+    /* the report beside the saves (that folder is known to be writable),
+       with what the data folder itself holds, and a notification */
+    FILE *scan = fopen("/data/ct-recomp/packs-scan.txt", "w");
+    int scan_entries = 0, scan_packs0 = n_packs_listed;
+    if (scan) {
+        int ds[3];
+        ps5_dir_status(ds);
+        fprintf(scan, "packs folder %s: %s (open %#x / %#x)\n", packs_folder,
+                d ? "opened" : "cannot open", (unsigned)ds[0], (unsigned)ds[1]);
+        DIR *r = opendir("/data/ct-recomp");
+        struct dirent *re;
+        fprintf(scan, "/data/ct-recomp holds:%s\n", r ? "" : " (cannot open)");
+        while (r && (re = readdir(r)))
+            fprintf(scan, "  \"%s\" (type %d)\n", re->d_name, re->d_type);
+        if (r)
+            closedir(r);
+        {
+            int ds3[3];
+            ps5_dir_status(ds3);
+            const unsigned char *pk = ps5_dir_peek();
+            fprintf(scan, "getdents: %d; first bytes:", ds3[2]);
+            for (int k = 0; k < 48; k++)
+                fprintf(scan, " %02x", pk[k]);
+            fprintf(scan, "\n");
         }
+        fprintf(scan, "%s holds:\n", packs_folder);
+    }
+#endif
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        if (e->d_name[0] == '.' || !strcmp(e->d_name, "dump"))
+            continue;
+        char t[1100], n[600];
+        snprintf(t, sizeof t, "%s/%s/pack.toml", packs_folder, e->d_name);
+        FILE *f = fopen(t, "r");
+        const char *how = "no pack.toml";
+        if (f) {
+            fclose(f);
+            pack_list_add(e->d_name);
+            how = "pack";
+        } else {
+            snprintf(t, sizeof t, "%s/%s/%s/pack.toml", packs_folder, e->d_name, e->d_name);
+            if ((f = fopen(t, "r"))) {
+                fclose(f);
+                snprintf(n, sizeof n, "%s/%s", e->d_name, e->d_name);
+                pack_list_add(n);
+                how = "pack (one level deeper)";
+            }
+        }
+#ifdef CT_PS5
+        scan_entries++;
+        if (scan)
+            fprintf(scan, "  \"%s\" (type %d): %s\n", e->d_name, e->d_type, how);
+#else
+        (void)how;
+#endif
+    }
+#ifdef CT_PS5
+    /* port: names tried without the listing: the lines of packs.txt (in the
+       packs folder, or one level down where an unzip put it), and the
+       names of the packs this project ships, each as NAME, NAME/NAME and
+       NAME-pack/NAME (an unzip into a folder named after the zip) */
+    {
+        static const char *const known[] = {"crono-remaster", NULL};
+        char names[24][200];
+        int nn = 0;
+        for (int k = 0; known[k]; k++)
+            snprintf(names[nn++], sizeof names[0], "%s", known[k]);
+        const char *txts[] = {"packs.txt", "crono-remaster-pack/packs.txt", NULL};
+        for (int k = 0; txts[k]; k++) {
+            char t[700], line[200];
+            snprintf(t, sizeof t, "%s/%s", packs_folder, txts[k]);
+            FILE *lf = fopen(t, "r");
+            while (lf && nn < 24 && fgets(line, sizeof line, lf)) {
+                line[strcspn(line, "\r\n")] = 0;
+                if (line[0] && line[0] != '#')
+                    snprintf(names[nn++], sizeof names[0], "%s", line);
+            }
+            if (lf)
+                fclose(lf);
+        }
+        for (int k = 0; k < nn; k++) {
+            char cand[3][420];
+            snprintf(cand[0], sizeof cand[0], "%s", names[k]);
+            snprintf(cand[1], sizeof cand[1], "%s/%s", names[k], names[k]);
+            snprintf(cand[2], sizeof cand[2], "%s-pack/%s", names[k], names[k]);
+            for (int c = 0; c < 3; c++) {
+                char pt[1100];
+                snprintf(pt, sizeof pt, "%s/%s/pack.toml", packs_folder, cand[c]);
+                FILE *f = fopen(pt, "r");
+                if (scan)
+                    fprintf(scan, "  tried \"%s\": %s\n", cand[c], f ? "pack" : "no");
+                if (f) {
+                    fclose(f);
+                    pack_list_add(cand[c]);
+                    break;
+                }
+            }
+        }
+    }
+    {
+        int ds2[3];
+        ps5_dir_status(ds2);
+        snprintf(packs_scan_text, sizeof packs_scan_text, "build 32: %s, %d seen, %d packs (%x %x %x)",
+                 d ? "opened" : "not readable", scan_entries, n_packs_listed - scan_packs0,
+                 (unsigned)ds2[0], (unsigned)ds2[1], (unsigned)ds2[2]);
+    }
+    if (scan)
+        fclose(scan);
+    {
+        static int told;
+        int ds[3];
+        ps5_dir_status(ds);
+        if (!told++)
+            ps5_notify("Packs folder: %s, %d entries, %d packs (%x %x %x)",
+                       d ? "found" : "not readable", scan_entries, n_packs_listed - scan_packs0,
+                       (unsigned)ds[0], (unsigned)ds[1], (unsigned)ds[2]);
+    }
+#endif
     if (d)
         closedir(d);
+#endif
+#ifdef CT_PS5
+    settings_register(&(setting){
+        .label = "Export character poses", .category = "Packs", .key = "pose_export", .type = SETTING_BOOL,
+        .get = get_pose_export, .set = set_pose_export, .flags = SETTING_NO_SAVE,
+        .help = "Save every character frame drawn on the field into "
+                "/data/ct-recomp/sheets/ct5 (one picture per frame, and sheets when "
+                "turned off), to make a character pack from."});
+#endif
+#ifdef CT_PS5
+    settings_register(&(setting){.label = "Folder check", .category = "Packs",
+                                 .type = SETTING_INFO, .text = packs_scan_get,
+                                 .help = "What CT5 found in the packs folder (for a photo if a "
+                                         "pack is missing)."});
 #endif
     settings_register(&(setting){.label = "Asset packs", .category = "Packs", .type = SETTING_INFO,
                                  .flags = SETTING_HEADING});

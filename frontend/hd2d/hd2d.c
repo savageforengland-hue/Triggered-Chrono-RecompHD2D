@@ -181,6 +181,7 @@ typedef ptrdiff_t GLsizeiptr;
     X(void, glUniform3f, (GLint loc, GLfloat a, GLfloat b, GLfloat c))                        \
     X(void, glUniform4f, (GLint loc, GLfloat a, GLfloat b, GLfloat c, GLfloat d))             \
     X(void, glUniform3fv, (GLint loc, GLsizei n, const GLfloat *v))                           \
+    X(void, glUniform4fv, (GLint loc, GLsizei n, const GLfloat *v))                           \
     X(void, glGenVertexArrays, (GLsizei n, GLuint *v))                                        \
     X(void, glDeleteVertexArrays, (GLsizei n, const GLuint *v))                               \
     X(void, glBindVertexArray, (GLuint v))                                                    \
@@ -540,6 +541,7 @@ static struct {
     float focus_y;
     unsigned frame;
     GLuint t_text;                  /* port: HD text overlay (hd2d_set_text_overlay) */
+    GLuint t_panel;                 /* port: remastered menus' mask (hd2d_set_ui_panels) */
     unsigned text_gen;              /* what t_text holds */
     int text_w, text_h;
     /* On-screen message: text, frames left, and its mask texture. */
@@ -579,6 +581,7 @@ static struct {
         /* The world map (CT_SCENE_WORLD, scene3d_world.c): the ground's
            normals, the overlay's tilemap; its own camera; entrance marks. */
         GLuint t_world_nrm, t_overlay;
+        int cloud_pal;   /* port: the overlay's clouds' palette, -1 any */
         /* Console pixels the scene doesn't hold (s3d_box_mask): R8UI, the
            console's size; laid flat over the 3D picture with the UI. */
         GLuint t_box;
@@ -931,6 +934,44 @@ void hd2d_set_text_overlay(const uint8_t *rgba, int w, int h, float x, float y, 
     text_ov.gen = gen;
 }
 
+/* port: remastered menus (hd2d_set_ui_panels) */
+#define UI_PANELS 16
+static struct {
+    uint8_t mask[SCHED_WIDTH * SCHED_HEIGHT];
+    float rect[UI_PANELS][4];
+    int n, style, dirty;
+} ui_pan;
+
+void hd2d_set_ui_panels(const uint8_t *mask, const float (*rects)[4], int n, int style)
+{
+    n = n < 0 ? 0 : n > UI_PANELS ? UI_PANELS : n;
+    ui_pan.style = style;
+    ui_pan.n = style && mask ? n : 0;
+    if (ui_pan.n) {
+        memcpy(ui_pan.mask, mask, sizeof ui_pan.mask);
+        memcpy(ui_pan.rect, rects, sizeof(float) * 4 * (size_t)n);
+        ui_pan.dirty = 1;
+    }
+}
+
+static void ui_panels_bind(int pf)
+{
+    if (!g.t_panel)
+        g.t_panel = make_tex(SCHED_WIDTH, SCHED_HEIGHT, GL_R8, GL_RED, GL_UNSIGNED_BYTE, GL_NEAREST);
+    if (ui_pan.n && ui_pan.dirty) {
+        p_glBindTexture(GL_TEXTURE_2D, g.t_panel);
+        p_glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SCHED_WIDTH, SCHED_HEIGHT, GL_RED,
+                          GL_UNSIGNED_BYTE, ui_pan.mask);
+        ui_pan.dirty = 0;
+    }
+    p_glUniform1i(U(pf, "uPanelMask"), 14);
+    bind_tex(14, g.t_panel);
+    p_glUniform1i(U(pf, "uPanelN"), debug_view ? 0 : ui_pan.n);
+    p_glUniform1i(U(pf, "uPanelStyle"), ui_pan.style);
+    if (ui_pan.n)
+        p_glUniform4fv(U(pf, "uPanel"), ui_pan.n, &ui_pan.rect[0][0]);
+}
+
 static void text_upload(void)
 {
     if (!text_ov.rgba || (g.t_text && g.text_gen == text_ov.gen))
@@ -1209,6 +1250,8 @@ void hd2d_shutdown(void)
         p_glDeleteTextures(1, &g.t_osd);
     if (g.t_text)   /* port: HD text */
         p_glDeleteTextures(1, &g.t_text);
+    if (g.t_panel)
+        p_glDeleteTextures(1, &g.t_panel);
     p_glDeleteFramebuffers(1, &g.fbo_light);
     for (int k = 0; k < P_ALL; k++)
         p_glDeleteProgram(g.prog[k]);
@@ -1547,6 +1590,7 @@ static void post(const settings *s, int px, int py, int pw, int ph, int ow, int 
                       g.osd_h * scale);
         p_glUniform1f(U(pf, "uOsdAlpha"), g.t_osd ? osd_alpha : 0.0f);
     }
+    ui_panels_bind(pf);   /* port: remastered menus */
     {   /* port: HD text, over the picture where its console pixels are */
         text_upload();
         int on = text_ov.rgba && g.t_text && !debug_view;
@@ -2034,6 +2078,23 @@ static void s3d_update(const ct_scene *sc)
         if (sc->layer[2].present && sc->layer[2].tiles && sc->overlay_h <= 128)
             p_glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, CT_SCENE_WORLD_STRIDE, sc->overlay_h,
                               GL_RED_INTEGER, GL_UNSIGNED_SHORT, sc->layer[2].tiles);
+        /* port: the clouds' palette, the overlay's commonest one: a caption
+           (a place's name) is drawn into the same layer with another
+           palette, and its box floated over the map as a pale box */
+        g.s3.cloud_pal = -1;
+        if (sc->layer[2].present && sc->layer[2].tiles && sc->overlay_h <= 128) {
+            int cnt[8] = {0};
+            for (int y = 0; y < sc->overlay_h; y++)
+                for (int x = 0; x < sc->overlay_w && x < CT_SCENE_WORLD_STRIDE; x++) {
+                    uint16_t e = sc->layer[2].tiles[y * CT_SCENE_WORLD_STRIDE + x];
+                    if (e & 0x3FF)
+                        cnt[(e >> 10) & 7]++;
+                }
+            int best = 0;
+            for (int k = 1; k < 8; k++)
+                best = cnt[k] > cnt[best] ? k : best;
+            g.s3.cloud_pal = cnt[best] ? best : -1;
+        }
     } else {
         s3d_build_sprites(sc, &p, &g.s3.spr);
         p_glBindVertexArray(g.s3.vao[1]);
@@ -2543,6 +2604,7 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
         p_glUniform1i(U(P, "uPassKind"), 0);
         p_glUniform1f(U(P, "uTime"), (float)(g.frame % 36000u) / 60.0f);
         p_glUniform1i(U(P, "uOverlayChr"), sc->layer[2].chr_base);
+        p_glUniform1i(U(P, "uCloudPal"), g.s3.cloud_pal);
         p_glUniform4f(U(P, "uOverlay"), (float)sc->overlay_x, (float)sc->overlay_y,
                       8.0f * sc->overlay_w, 8.0f * sc->overlay_h);
         p_glUniform4f(U(P, "uCloud"), S3D_CLOUD_Y, sc->overlay_blend / 16.0f * 0.8f,
@@ -2748,12 +2810,34 @@ void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behi
     const ct_scene *sc = g.s3.scene;
     int want3 = s->scene3d && g.s3.ok && sc &&
                 (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD) && sc->vram &&
+                /* port: a field nobody controls (the title's opening scenes:
+                   the sky, the flying machine, scrolling layers drawn as a
+                   map) stays the console's picture; it came out scrambled */
+                (sc->mode != CT_SCENE_FIELD || sc->player < sc->n_objects) &&
                 !(st && st->mode == 7) &&
                 /* the map's layers (BG1, BG2) on neither screen: the
                    console shows something else over a loaded map (a
                    black screen with text), so the 3D view would show a
                    map nobody sees */
                 !(st && !((st->main_enabled | st->sub_enabled) & 3));
+    /* port: a map view that drops out for a few frames (seen on the world
+       map's bridges) stays 3D: only 8 frames in a row without it fade the
+       3D view out; before, each dropped frame cut to the 2D picture and the
+       view flicked between the two. Logged, for finding out why. */
+    {
+        static int off_run, logged;
+        if (want3 || !sc) {
+            off_run = 0;
+        } else if (g.s3.amt > 0.0f && ++off_run < 8) {
+            if (logged < 20) {
+                fprintf(stderr, "hd2d: 3D dropped a frame: mode %d, bg %x/%x, ppu mode %d\n",
+                        sc->mode, st ? st->main_enabled : 0, st ? st->sub_enabled : 0,
+                        st ? st->mode : -1);
+                logged++;
+            }
+            want3 = (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD) && sc->vram;
+        }
+    }
     /* port: back from a battle, the map settles first: the game says it
        is a map view a moment before its tiles are all back in video
        memory, and the 3D view, which reads them from there, showed the

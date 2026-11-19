@@ -112,6 +112,10 @@ int hd2d_read(uint8_t *bgrx, int out_w, int out_h);
    0-9 and the punctuation in osd_font.h, and [token] button glyphs:
    osd_text.h, glyphs.h; at most 159 bytes). */
 void hd2d_osd(const char *text);
+/* port: remastered menus (frontend/uipanel.h): this frame's windows,
+   console pixels x, y, w, h, and the mask of the console pixels a panel
+   replaces (SCHED_WIDTH x SCHED_HEIGHT, 1); style 0: none, 1: glass. */
+void hd2d_set_ui_panels(const uint8_t *mask, const float (*rects)[4], int n, int style);
 /* port: every 4 s, the GPU and CPU time per frame on screen (needs CT_HD2D_PROFILE). */
 void hd2d_set_perf_osd(int on);
 int hd2d_perf_osd(void);

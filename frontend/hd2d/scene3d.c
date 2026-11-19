@@ -146,6 +146,8 @@ typedef struct {
     uint8_t boxed[MAXC][MAXC];      /* its floor is inside a box */
     uint8_t hooked[MAXC][MAXC];     /* the cell hook drew it (or nothing) */
     float card_shift;               /* port: s3d_params.card_shift (cards) */
+    uint8_t ground_ok[MAXC][MAXC];  /* port: per quarter (bit q): the back layer's tile there
+                                       has pixels and stays down (cards' ground fill) */
 } build_ctx;
 
 static build_ctx ctx;   /* the last build's, also for placing sprites */
@@ -226,7 +228,17 @@ static void emit_quarter(build_ctx *c, const ct_scene_layer *L, uint16_t e, cons
     for (int k = 0; k < 3; k++)
         tl[k] = p->o[k] + 8 * (float)(q & 1) * p->u[k] + 8 * (float)(q >> 1) * p->v[k] +
                 lift * nrm[p->normal][k];
-    s3d_emit(c->m, tl, p->u, p->v, pack(L, e, p->normal, p->flags | extra), e & 0x4000,
+    /* port: a hair larger on every side (0.02 px), so neighbouring tiles
+       overlap instead of leaving hairline cracks the background shows
+       through */
+    const float eps = 0.02f;
+    float u2[3], v2[3];
+    for (int k = 0; k < 3; k++) {
+        tl[k] -= eps * (p->u[k] + p->v[k]);
+        u2[k] = p->u[k] * (1.0f + eps / 4.0f);
+        v2[k] = p->v[k] * (1.0f + eps / 4.0f);
+    }
+    s3d_emit(c->m, tl, u2, v2, pack(L, e, p->normal, p->flags | extra), e & 0x4000,
              e & 0x8000);
 }
 
@@ -457,16 +469,15 @@ static void emit_card_cell(build_ctx *c, int x, int y)
                    (of this quarter) that stays down in the cells around it,
                    the paving or grass that repeats; a one-off neighbour
                    (another part of the same tent) showed as a ghost copy. */
-                uint16_t g = 0, cand[81];
-                int cnt[81], nc = 0, found = 0, best = 1;
-                for (int dy = -4; dy <= 4; dy++)
-                    for (int dx = -4; dx <= 4; dx++) {
+                uint16_t g = 0, cand[49];
+                int cnt[49], nc = 0, found = 0, best = 1;
+                for (int dy = -3; dy <= 3; dy++)
+                    for (int dx = -3; dx <= 3; dx++) {
                         int nx = x + dx, ny = y + dy;
-                        if (nx < 0 || ny < 0 || nx >= s->map_w || ny >= s->map_h)
+                        if (nx < 0 || ny < 0 || nx >= s->map_w || ny >= s->map_h ||
+                            !(c->ground_ok[ny][nx] & (1u << q)))
                             continue;
                         uint16_t ne = entry_at(L, nx, ny, q);
-                        if ((ne & 0x2000) || tile_empty(s, L, ne))
-                            continue;
                         int k = 0;
                         while (k < nc && cand[k] != ne)
                             k++;
@@ -546,6 +557,14 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
     find_runs(c);
     c->card_shift = p->card_shift > 0.0f ? p->card_shift : 1.0f;
     if (p->cards) {
+        const ct_scene_layer *B = layer_of(s, draw_layers[0]);
+        for (int y = 0; y < s->map_h; y++)
+            for (int x = 0; x < s->map_w; x++)
+                for (int q = 0; B && q < 4; q++) {
+                    uint16_t e = entry_at(B, x, y, q);
+                    if (!(e & 0x2000) && !tile_empty(s, B, e))
+                        c->ground_ok[y][x] |= (uint8_t)(1u << q);
+                }
         memset(box_h, 0, sizeof box_h);
         memset(box_b, -1, sizeof box_b);
     } else
@@ -615,6 +634,29 @@ static int oam_visible(const ct_scene *s, int e, int *x, int *y, int *size)
 /* One OAM entry as 8x8 quads standing upright at world z = foot_z: a
    screen row r is at height base_y + (foot_sy - r + lift) * stretch,
    foot_sy being the foot's screen row. */
+/* port: the screen row under an OAM entry's lowest opaque pixel (its box
+   bottom when it has none): sprites keep empty rows under the feet, and
+   standing the box's bottom on the ground floated the character that far
+   above its shadow. */
+static int opaque_bottom(const ct_scene *s, int e, int y, int size)
+{
+    uint16_t w1 = s->oam[2 * e + 1];
+    int vf = (w1 >> 15) & 1, n = size / 8;
+    uint32_t base = s->obj_chr[(w1 >> 8) & 1];
+    for (int r = size - 1; r >= 0; r--) {   /* screen rows, bottom up */
+        int sr = vf ? size - 1 - r : r;       /* the row in the stored image */
+        int ty = sr / 8, py = sr % 8;
+        for (int tx = 0; tx < n; tx++) {
+            int used = ((((w1 & 0xFF) >> 4) + ty) << 4) | (((w1 & 0xF) + tx) & 0xF);
+            uint32_t a = (base + (uint32_t)used * 16) & S3D_ADDR_MASK;
+            if (s->vram[(a + (uint32_t)py) & S3D_ADDR_MASK] ||
+                s->vram[(a + 8u + (uint32_t)py) & S3D_ADDR_MASK])
+                return y + r + 1;
+        }
+    }
+    return y + size;
+}
+
 /* port: s3d_build_sprites runs twice: the entries under OAM priority 3
    (pass 0), then those over everything (pass 1); emit_piece skips the
    others. */
@@ -663,17 +705,60 @@ static int build_sprites_pass(const ct_scene *s, const s3d_params *p, s3d_mesh *
        that object instead of at its own bottom, which split it apart */
     int ob_n = 0, ob_box[CT_SCENE_MAX_OBJECTS][4], ob_foot[CT_SCENE_MAX_OBJECTS];
     float ob_z[CT_SCENE_MAX_OBJECTS], ob_base[CT_SCENE_MAX_OBJECTS];
+    /* port: objects drawn as parts of one bigger one (a boss whose arms
+       are objects of their own) stand at the biggest one's foot: each at
+       its own bottom, the parts came out at other depths and heights, the
+       figure disjointed. A part: its box mostly (60%) inside a bigger
+       object's box, its bottom not below that one's. */
+    int all_box[CT_SCENE_MAX_OBJECTS][4], all_ok[CT_SCENE_MAX_OBJECTS];
+    for (int k = 0; k < s->n_objects && k < CT_SCENE_MAX_OBJECTS; k++) {
+        const ct_scene_object *o = &s->object[k];
+        int bx0 = 100000, by0 = 100000, bx1 = -100000, by1 = -100000;
+        for (int j = 0; j < o->n_pieces; j++) {
+            int x, y, size;
+            if (!oam_visible(s, o->piece[j], &x, &y, &size))
+                continue;
+            bx0 = x < bx0 ? x : bx0;
+            by0 = y < by0 ? y : by0;
+            bx1 = x + size > bx1 ? x + size : bx1;
+            int ob = opaque_bottom(s, o->piece[j] & 127, y, size);
+            by1 = ob > by1 ? ob : by1;
+        }
+        all_ok[k] = bx1 > bx0;
+        all_box[k][0] = bx0;
+        all_box[k][1] = by0;
+        all_box[k][2] = bx1;
+        all_box[k][3] = by1;
+    }
     for (int k = 0; k < s->n_objects && k < CT_SCENE_MAX_OBJECTS; k++) {
         const ct_scene_object *o = &s->object[k];
         if (!o->n_pieces)
             continue;
+        int group_bottom = -100000;
+        if (all_ok[k]) {
+            int *a = all_box[k], area = (a[2] - a[0]) * (a[3] - a[1]), best = 0;
+            for (int j = 0; j < s->n_objects && j < CT_SCENE_MAX_OBJECTS; j++) {
+                if (j == k || !all_ok[j])
+                    continue;
+                int *b = all_box[j], barea = (b[2] - b[0]) * (b[3] - b[1]);
+                int ix = (a[2] < b[2] ? a[2] : b[2]) - (a[0] > b[0] ? a[0] : b[0]);
+                int iy = (a[3] < b[3] ? a[3] : b[3]) - (a[1] > b[1] ? a[1] : b[1]);
+                if (barea > area && barea > best && ix > 0 && iy > 0 && ix * iy * 10 >= area * 6 &&
+                    b[3] >= a[3]) {
+                    best = barea;
+                    group_bottom = b[3];
+                }
+            }
+        }
         int foot_sy = (int)(o->y - s->camera_y);
         /* The sprite's lowest row stands on the floor, never under it. */
         int bottom = -100000;
         for (int j = 0; j < o->n_pieces; j++) {
             int x, y, size;
-            if (oam_visible(s, o->piece[j], &x, &y, &size) && y + size > bottom)
-                bottom = y + size;
+            if (oam_visible(s, o->piece[j], &x, &y, &size)) {
+                int ob = opaque_bottom(s, o->piece[j] & 127, y, size);
+                bottom = ob > bottom ? ob : bottom;
+            }
         }
         if (bottom == -100000)
             continue;
@@ -682,8 +767,11 @@ static int build_sprites_pass(const ct_scene *s, const s3d_params *p, s3d_mesh *
            a frame apart from what the console drew, and the difference
            made walkers bob up and down and split head from body. Only a
            jump's height (z) lifts it off the ground. */
-        int zj = o->z > 0 && o->z < 64 ? o->z : 0;
-        foot_sy = bottom + zj;
+        /* port: the object's height (z) isn't used: the cards' world is
+           flat, so a character on a raised walkway (z > 0) stood above its
+           own shadow; its feet stay on the row the console drew them. */
+        int zj = 0;
+        foot_sy = (group_bottom > bottom ? group_bottom : bottom) + zj;
         float lift = 0.0f;
         /* Standing in a raised cell: the console drew it over the wall
            there if its priority beats the wall's tiles (always for
@@ -793,11 +881,41 @@ int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
                 continue;
             x0 = x < x0 ? x : x0;
             x1 = x + size > x1 ? x + size : x1;
-            bottom = y + size > bottom ? y + size : bottom;
+            int ob = opaque_bottom(s, o->piece[j] & 127, y, size);
+            bottom = ob > bottom ? ob : bottom;
         }
         if (bottom == -100000 || x1 - x0 > 64)
             continue;
-        int zj = o->z > 0 && o->z < 64 ? o->z : 0;
+        /* a part of a bigger object (see build_sprites_pass): no shadow of its own */
+        int part = 0, top = 100000;
+        for (int j = 0; j < o->n_pieces; j++) {
+            int x, y, size;
+            if (oam_visible(s, o->piece[j], &x, &y, &size) && y < top)
+                top = y;
+        }
+        for (int k2 = 0; k2 < s->n_objects && k2 < CT_SCENE_MAX_OBJECTS && !part; k2++) {
+            const ct_scene_object *b = &s->object[k2];
+            if (k2 == k)
+                continue;
+            int bx0 = 100000, by0 = 100000, bx1 = -100000, by1 = -100000;
+            for (int j = 0; j < b->n_pieces; j++) {
+                int x, y, size;
+                if (!oam_visible(s, b->piece[j], &x, &y, &size))
+                    continue;
+                bx0 = x < bx0 ? x : bx0;
+                by0 = y < by0 ? y : by0;
+                bx1 = x + size > bx1 ? x + size : bx1;
+                int ob = opaque_bottom(s, b->piece[j] & 127, y, size);
+                by1 = ob > by1 ? ob : by1;
+            }
+            int area = (x1 - x0) * (bottom - top), barea = (bx1 - bx0) * (by1 - by0);
+            int ix = (x1 < bx1 ? x1 : bx1) - (x0 > bx0 ? x0 : bx0);
+            int iy = (bottom < by1 ? bottom : by1) - (top > by0 ? top : by0);
+            part = barea > area && ix > 0 && iy > 0 && ix * iy * 10 >= area * 6 && by1 >= bottom;
+        }
+        if (part)
+            continue;
+        int zj = 0;   /* (as above) */
         float w = (float)(x1 - x0) * 0.8f, d = w * 0.45f;
         float cx = (float)(s->camera_x + (x0 + x1) / 2), cz = (float)(s->camera_y + bottom + zj);
         float tl[3] = {cx - w * 0.5f, 0.05f, cz - d * 0.65f};

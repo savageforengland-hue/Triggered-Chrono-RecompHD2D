@@ -501,6 +501,7 @@ void packs_dump_frame(long frame, const sched_prov_px *prov, const sched_vmem *m
     if (!dump.manifest || !prov || !m)
         return;
     long before = dump.pieces + dump.objs;
+    int written = 0;
     kmap_free(&dump.frame_ids);
     static oam_piece pc[128];
     memset(pc, 0, sizeof pc);
@@ -526,9 +527,13 @@ void packs_dump_frame(long frame, const sched_prov_px *prov, const sched_vmem *m
                     fkeys[nf] = key;
                     kmap_put(&dump.frame_ids, id, nf++);
                 }
-                if (key && !kmap_find(&dump.seen, key)) {
+                /* port: at most 6 new pictures written a frame (each is a PNG
+                   file): the rest wait for the next frames, so dumping no
+                   longer stalls the game on a screen full of new tiles */
+                if (key && written < 6 && !kmap_find(&dump.seen, key)) {
                     kmap_put(&dump.seen, key, 1);
                     dump_piece(frame, m, p, key);
+                    written++;
                 }
             }
             last_id = id;

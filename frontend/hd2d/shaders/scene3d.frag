@@ -168,6 +168,7 @@ uniform sampler2D uWorldNrm;
 // scroll (px), size (px); uCloud: height, opacity, shadow amount (0: none).
 uniform usampler2D uOverlayMap;
 uniform int uOverlayChr;
+uniform int uCloudPal;           // port: the clouds' palette (-1: any)
 uniform vec4 uOverlay;
 uniform vec4 uCloud;
 uniform vec2 uCloudClear;        // where it thins out (over the player)
@@ -179,6 +180,8 @@ vec4 overlayTexel(vec2 p)
     vec2 q = mod(p + uOverlay.xy, uOverlay.zw);
     ivec2 t = ivec2(floor(q / 8.0));
     uint e = texelFetch(uOverlayMap, t, 0).r;
+    if (uCloudPal >= 0 && int((e >> 10u) & 7u) != uCloudPal)
+        return vec4(0.0);   // not a cloud: a caption's box (port)
     uint tile = ((uint(uOverlayChr) + (e & 0x3FFu) * 8u) & 0x7FFFu) | ((e >> 10u) & 7u) << 15u |
                 (1u << 18u);
     vec2 uv = q - vec2(t) * 8.0;
@@ -197,12 +200,31 @@ uniform int uSmooth;             // pixel-art smoothing in the 3D view
 vec4 tileTexelAA(uint tile, vec2 uv)
 {
     vec2 dx = dFdx(uv) * 0.3, dy = dFdy(uv) * 0.3;
+    vec2 fw = max((abs(dx) + abs(dy)) / 0.3, vec2(1e-4));   // texels per pixel
     // Only where a screen pixel spans over half a texel (far, or seen at a
     // slant): close up one texel covers several pixels and a single read is
     // already even, and the four reads cost most of the frame.
     float span = max(dot(dx, dx), dot(dy, dy));   // (0.3 * texels per pixel)^2
-    if (uSmooth == 0 || (tile & (1u << 26)) != 0u || span < 0.0225)   // packed: filtered
+    if (uSmooth == 0 || (tile & (1u << 26)) != 0u)   // packed pictures: filtered already
         return tileTexel(tile, uv);
+    if (span < 0.0225) {
+        // port: magnified (close up, most of the screen): "sharp bilinear",
+        // each texel a flat square with a one-pixel soft edge to the next,
+        // so every texel comes out the same size on the screen instead of
+        // some rows and columns a pixel wider (uneven, blocky sprites).
+        vec2 p = uv - 0.5, i = floor(p), f = p - i;
+        vec2 w = clamp((f - 0.5) / fw + 0.5, 0.0, 1.0);
+        if ((w.x == 0.0 || w.x == 1.0) && (w.y == 0.0 || w.y == 1.0))
+            return tileTexel(tile, i + 0.5 + w);
+        vec4 a = tileTexel(tile, i + vec2(0.5, 0.5)), b = tileTexel(tile, i + vec2(1.5, 0.5));
+        vec4 c = tileTexel(tile, i + vec2(0.5, 1.5)), d = tileTexel(tile, i + vec2(1.5, 1.5));
+        float wa = (1.0 - w.x) * (1.0 - w.y) * a.a, wb = w.x * (1.0 - w.y) * b.a;
+        float wc = (1.0 - w.x) * w.y * c.a, wd = w.x * w.y * d.a;
+        float al = (1.0 - w.x) * (1.0 - w.y) * a.a + w.x * (1.0 - w.y) * b.a +
+                   (1.0 - w.x) * w.y * c.a + w.x * w.y * d.a;
+        vec3 rgb = (a.rgb * wa + b.rgb * wb + c.rgb * wc + d.rgb * wd) / max(wa + wb + wc + wd, 1e-4);
+        return vec4(rgb, al);
+    }
     vec4 a = tileTexel(tile, uv - dx - dy), b = tileTexel(tile, uv + dx - dy);
     vec4 c = tileTexel(tile, uv - dx + dy), d = tileTexel(tile, uv + dx + dy);
     float al = a.a + b.a + c.a + d.a;

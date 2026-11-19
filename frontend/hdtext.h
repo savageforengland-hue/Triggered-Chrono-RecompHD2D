@@ -66,4 +66,8 @@ int hdtext_frame(const ct_text *t, const sched_prov_px *prov, const sched_vmem *
                  int brightness, const uint8_t *bgrx, const uint8_t *layers, int scale,
                  hdtext_result *r);
 
+/* port: the pixels the last hdtext_frame took the console's glyphs out
+   of (SCHED_WIDTH x SCHED_HEIGHT, nonzero), or NULL if it drew none. */
+const uint8_t *hdtext_removed(void);
+
 #endif

@@ -144,10 +144,70 @@ vec3 shade(vec2 fc)
     return clamp(c, 0.0, 1.0);
 }
 
+// port: remastered menus (hd2d_set_ui_panels): where the mask says a
+// window's frame or background was, a panel drawn at the output's
+// resolution instead. Style 1: glass (frosted navy, rounded, a light rim).
+uniform sampler2D uPanelMask;   // console size, nearest: 1 = replaced
+uniform vec4 uPanel[16];        // the windows, console px: x, y, w, h
+uniform int uPanelN;
+uniform int uPanelStyle;
+
+float sdRoundBox(vec2 p, vec2 b, float r)
+{
+    vec2 q = abs(p) - b + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+vec3 panels(vec3 c, vec2 fc)
+{
+    if (uPanelN == 0 || uPanelStyle == 0)
+        return c;
+    vec2 uv = (fc - uRect.xy) / uRect.zw;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0))))
+        return c;
+    vec2 cp = uv * vec2(256.0, 224.0);
+    if (texelFetch(uPanelMask, ivec2(cp), 0).r < 0.5)
+        return c;
+    int k = -1;
+    for (int i = 0; i < 16; i++) {
+        if (i >= uPanelN)
+            break;
+        vec4 r = uPanel[i];
+        if (all(greaterThanEqual(cp, r.xy)) && all(lessThan(cp, r.xy + r.zw))) {
+            k = i;
+            break;
+        }
+    }
+    if (k < 0)
+        return c;
+    vec4 r = uPanel[k];
+    vec2 s = uRect.zw / vec2(256.0, 224.0);           // output px per console px
+    vec2 size = r.zw * s, lp = fc - (uRect.xy + r.xy * s) - size * 0.5;
+    float px = s.x, rad = 4.5 * px;
+    float d = sdRoundBox(lp, size * 0.5 - 0.75 * px, rad);
+    // Past the rounded corner: what is just outside the window.
+    vec2 out_ = clamp(cp, r.xy - 1.5, r.xy + r.zw + 0.5);
+    out_ = mix(out_, r.xy - 1.5 + step(r.xy + r.zw * 0.5, cp) * (r.zw + 2.0), 0.0);
+    vec2 o = cp + sign(lp) * 3.0;
+    o = clamp(o, vec2(0.5), vec2(255.5, 223.5));
+    vec3 outside = texture(uOrig, o / vec2(256.0, 224.0)).bgr;
+    // The glass: a navy gradient, a sheen over the top, a light rim.
+    float t = clamp((lp.y + size.y * 0.5) / size.y, 0.0, 1.0);
+    vec3 fill = mix(vec3(0.15, 0.21, 0.35), vec3(0.06, 0.09, 0.17), t);
+    fill += vec3(0.05, 0.06, 0.08) * (1.0 - smoothstep(0.0, 0.35, t));
+    float n = fract(sin(dot(floor(fc), vec2(12.9898, 78.233))) * 43758.5453);
+    fill += (n - 0.5) * 0.012;
+    float lw = max(1.5, 0.3 * px);
+    float rim = 1.0 - smoothstep(0.0, lw, abs(d + lw));
+    vec3 panel = mix(fill, vec3(0.78, 0.87, 1.0), rim * mix(0.75, 0.35, t));
+    return mix(panel, outside, smoothstep(-1.0, 1.0, d));
+}
+
 void main()
 {
     vec2 fc = vec2(gl_FragCoord.x, uFlip == 1 ? uOut.y - gl_FragCoord.y : gl_FragCoord.y);
     vec3 c = shade(fc);
+    c = panels(c, fc);
     if (uTextOn == 1) {
         vec2 o = (fc - uTextRect.xy) / uTextRect.zw;
         if (all(greaterThanEqual(o, vec2(0.0))) && all(lessThan(o, vec2(1.0)))) {
