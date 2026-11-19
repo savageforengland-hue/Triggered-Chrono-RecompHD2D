@@ -1,0 +1,57 @@
+name: Publish ROM-free Chrono Trigger PS5 port
+on:
+  push:
+    branches:
+      - ps5-upload-staging-20261119
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Validate original uploads and publish full source history
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/ct5-ps5-import"
+          mkdir -p "$stage"
+          cp ps5-upload/ps5-port.bundle "$stage/ps5-port.bundle"
+          cp ps5-upload/ct5-PPSA28360-build12.zip "$stage/ct5-PPSA28360-build12.zip"
+          cat ps5-upload/ct5-hd2d-PPSA28361-gpu-build2.zip.part00 ps5-upload/ct5-hd2d-PPSA28361-gpu-build2.zip.part01 ps5-upload/ct5-hd2d-PPSA28361-gpu-build2.zip.part02 ps5-upload/ct5-hd2d-PPSA28361-gpu-build2.zip.part03 > "$stage/ct5-hd2d-PPSA28361-gpu-build2.zip"
+          cp ps5-upload/SHA256SUMS.txt "$stage/SHA256SUMS.txt"
+          (cd "$stage" && sha256sum -c SHA256SUMS.txt)
+          git fetch origin 6ff484423ab7df2e25266e2f282d55cf681bc1fd
+          git bundle verify "$stage/ps5-port.bundle"
+          git fetch "$stage/ps5-port.bundle" refs/heads/ps5/port:refs/heads/ps5/port
+          source_head="$(git rev-parse refs/heads/ps5/port)"
+          test "$source_head" = 3a143c14a58207e0571b40c3528b8f4e12f5ec88
+          remote_head="$(git ls-remote origin refs/heads/ps5/port | cut -f1)"
+          if [ -n "$remote_head" ]; then
+            git fetch origin "$remote_head"
+            git merge-base --is-ancestor "$remote_head" "$source_head" || { echo "Remote PS5 source has diverged; refusing to overwrite."; exit 1; }
+          fi
+          git switch ps5/port
+          mkdir -p ps5-builds
+          cp "$stage/ct5-PPSA28360-build12.zip" "$stage/ct5-hd2d-PPSA28361-gpu-build2.zip" ps5-builds/
+          grep '  ct5-.*\.zip$' "$stage/SHA256SUMS.txt" > ps5-builds/SHA256SUMS.txt
+          cat > ps5-builds/README.md <<'BUILDS'
+          # CT5 PS5 homebrew builds
+
+          These are unofficial ROM-free builds. You must supply your own legally obtained rom.sfc locally. The original source code and 17 commits are preserved in this branch.
+
+          * ct5-PPSA28360-build12.zip: standard PS5 software renderer, install under /data/homebrew/PPSA28360
+          * ct5-hd2d-PPSA28361-gpu-build2.zip: PS5 HD-2D GPU renderer, install under /data/homebrew/PPSA28361
+
+          HD-2D asset packs go under /data/ct-recomp/packs/. These archives have not been independently tested on PS5 hardware.
+          BUILDS
+          git add -f ps5-builds
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Add ROM-free CT5 PS5 and HD-2D build archives"
+          git push origin ps5/port
+          local_head="$(git rev-parse HEAD)"
+          pushed_head="$(git ls-remote origin refs/heads/ps5/port | cut -f1)"
+          test "$local_head" = "$pushed_head"
