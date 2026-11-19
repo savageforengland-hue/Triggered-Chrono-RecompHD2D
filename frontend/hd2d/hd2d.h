@@ -60,6 +60,22 @@ const char *hd2d_preset_name(int preset);
 void hd2d_set_debug(int view);
 int hd2d_debug(void);
 void hd2d_set_aspect(int aspect);
+/* port: depth of field: 0 off, 1 low, 2 full (the presets' own). */
+void hd2d_set_dof(int level);
+int hd2d_dof(void);
+/* Pixel-art smoothing of the 3D view's tiles (on by default). */
+/* port: the 3D view's style: 1 layered cards (each layer flat at its own
+   height), 0 the block diorama. */
+void hd2d_set_3d_style(int cards);
+int hd2d_3d_style(void);
+/* port: the 3D view's shadows (on by default). */
+/* port: how much the 3D cards' layers move apart: 0 full, 1 subtle, 2 flat. */
+void hd2d_set_3d_depth(int d);
+int hd2d_3d_depth(void);
+void hd2d_set_3d_shadows(int on);
+int hd2d_3d_shadows(void);
+void hd2d_set_smooth(int on);
+int hd2d_smooth(void);
 int hd2d_aspect(void);
 
 /* Draw one frame: bgrx and layers are SCHED_WIDTH x SCHED_HEIGHT
@@ -96,6 +112,9 @@ int hd2d_read(uint8_t *bgrx, int out_w, int out_h);
    0-9 and the punctuation in osd_font.h, and [token] button glyphs:
    osd_text.h, glyphs.h; at most 159 bytes). */
 void hd2d_osd(const char *text);
+/* port: every 4 s, the GPU and CPU time per frame on screen (needs CT_HD2D_PROFILE). */
+void hd2d_set_perf_osd(int on);
+int hd2d_perf_osd(void);
 /* port: HD text (frontend/hdtext.h): a picture drawn over the console's,
    rgba w x h texels, premultiplied alpha, covering console pixels x, y,
    cw, ch (it is stretched over them, linearly filtered); after the

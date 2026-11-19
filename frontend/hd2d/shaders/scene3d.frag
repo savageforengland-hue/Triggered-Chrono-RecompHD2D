@@ -190,6 +190,27 @@ vec4 overlayTexel(vec2 p)
 }
 #endif
 
+#ifndef SHADOW_PASS
+uniform int uSmooth;             // pixel-art smoothing in the 3D view
+// Four taps across the pixel's footprint: oblique and distant tiles average out instead of
+// flickering between texels, and a magnified texel edge gets a one-pixel soft step.
+vec4 tileTexelAA(uint tile, vec2 uv)
+{
+    vec2 dx = dFdx(uv) * 0.3, dy = dFdy(uv) * 0.3;
+    // Only where a screen pixel spans over half a texel (far, or seen at a
+    // slant): close up one texel covers several pixels and a single read is
+    // already even, and the four reads cost most of the frame.
+    float span = max(dot(dx, dx), dot(dy, dy));   // (0.3 * texels per pixel)^2
+    if (uSmooth == 0 || (tile & (1u << 26)) != 0u || span < 0.0225)   // packed: filtered
+        return tileTexel(tile, uv);
+    vec4 a = tileTexel(tile, uv - dx - dy), b = tileTexel(tile, uv + dx - dy);
+    vec4 c = tileTexel(tile, uv - dx + dy), d = tileTexel(tile, uv + dx + dy);
+    float al = a.a + b.a + c.a + d.a;
+    vec3 rgb = (a.rgb * a.a + b.rgb * b.a + c.rgb * c.a + d.rgb * d.a) / max(al, 1e-4);
+    return vec4(rgb, al * 0.25);
+}
+#endif
+
 uniform sampler2DShadow uShadowMap;
 uniform sampler2D uLightMap;     // point lights, in the console's screen space
 uniform vec3 uLightDir;          // towards the key light
@@ -209,10 +230,16 @@ const vec3 NORMALS[6] = vec3[6](vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(1
 
 float shadowAt(vec3 n, vec3 L)
 {
+    if (uDepth.w <= 0.0)   // shadows off (port): the map isn't drawn
+        return 1.0;
     vec3 s = vShadow.xyz / vShadow.w * 0.5 + 0.5;
     if (any(lessThan(s.xy, vec2(0.0))) || any(greaterThan(s.xy, vec2(1.0))))
         return 1.0;
     float bias = 0.0015 + 0.003 * (1.0 - max(dot(n, L), 0.0));
+#ifdef CT_FAST
+    // One lookup: the map's linear filter already compares four texels.
+    return texture(uShadowMap, vec3(s.xy, s.z - bias));
+#endif
     float t = uMisc.w, v = 0.0;
     for (int k = 0; k < 4; k++) {
         vec2 o = vec2(float(k & 1) - 0.5, float(k >> 1) - 0.5) * 1.5 * t;
@@ -257,7 +284,18 @@ void main()
     // the nearest of the fixed normals, for the ambient occlusion
     int ni = n.y > 0.7 ? 0 : abs(n.x) > abs(n.z) ? (n.x > 0.0 ? 2 : 3) : (n.z > 0.0 ? 1 : 4);
 #else
-    vec4 tex = tileTexel(vTile, vUV);
+#ifndef WORLD_MAP
+    if (((vTile >> 20u) & 7u) == 7u && (vTile & (1u << 19)) != 0u) {   // a contact shadow (port)
+        float r = length((vUV - 4.0) / 4.0);
+        if (r > 1.0)
+            discard;
+        float k = 1.0 - 0.45 * smoothstep(1.0, 0.25, r) * uDepth.z;
+        oLit = vec4(k, k, k, 1.0);   // multiplied in: the depth (a) stays
+        oMat = vec4(1.0);
+        return;
+    }
+#endif
+    vec4 tex = tileTexelAA(vTile, vUV);
     if (tex.a < 0.5)
         discard;
     vec3 col = tex.rgb;

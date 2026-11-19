@@ -32,6 +32,7 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,7 @@ typedef char GLchar;
 #define GL_FALSE                    0
 #define GL_LESS                     0x0201
 #define GL_LEQUAL                   0x0203
+#define GL_ALWAYS                   0x0207
 #define GL_DEPTH_BUFFER_BIT         0x00000100
 #define GL_UNSIGNED_SHORT           0x1403
 #define GL_UNSIGNED_INT             0x1405
@@ -130,6 +132,7 @@ typedef ptrdiff_t GLsizeiptr;
 #define GL_ZERO                     0
 #define GL_ONE                      1
 #define GL_SRC_ALPHA                0x0302
+#define GL_DST_COLOR                0x0306
 #define GL_ONE_MINUS_SRC_ALPHA      0x0303
 
 #define GL_FUNCS(X)                                                                           \
@@ -229,6 +232,14 @@ static int load_gl(void)
     return missing ? -1 : 0;
 }
 
+static int perf_osd;   /* port: hd2d_set_perf_osd */
+#ifdef CT_PS5
+static float dyn_scale = 1.0f;   /* port: the 3D view's dynamic resolution (PS5) */
+#endif
+void hd2d_set_perf_osd(int on) { perf_osd = on != 0; }
+int hd2d_perf_osd(void) { return perf_osd; }
+void hd2d_osd(const char *text);
+
 /* ---- optional per-pass GPU timing ----
    CT_HD2D_PROFILE=FILE writes one line per frame: GPU time per pass from
    timestamp queries (GL 3.3 / ARB_timer_query, or ES with
@@ -312,6 +323,12 @@ static void prof_flush(int s)
 {
     if (!prof.f || prof.n[s] < 2)
         return;
+#ifdef CT_PS5   /* port: every 30th frame on the console: a small file, few writes */
+    if (prof.frame[s] % 30) {
+        prof.n[s] = 0;
+        return;
+    }
+#endif
     GLuint64 t[PROF_MARKS];
     for (int k = 0; k < prof.n[s]; k++)
         prof.get(prof.q[s][k], GL_QUERY_RESULT, &t[k]);
@@ -322,6 +339,54 @@ static void prof_flush(int s)
         fprintf(prof.f, " %s=%.4f", prof.name[s][k], (double)(t[k] - t[k - 1]) / 1e6);
     fputc('\n', prof.f);
     fflush(prof.f);
+#ifdef CT_PS5
+    /* port: dynamic resolution for the 3D view. Every 30th frame: over
+       15 ms of GPU work (60 fps needs 16.7, with some to spare) draws the
+       3D scene 5% smaller, down to 75%; under 11 ms, 5% bigger again. */
+    {
+        int threeD = 0;
+        for (int k = 1; k < prof.n[s]; k++)
+            threeD |= !strncmp(prof.name[s][k], "s3d_", 4);
+        double gpu = (double)(t[prof.n[s] - 1] - t[0]) / 1e6;
+        if (threeD && gpu > 15.0 && dyn_scale > 0.751f)
+            dyn_scale -= 0.05f;
+        else if (threeD && gpu < 11.0 && dyn_scale < 0.999f)
+            dyn_scale += 0.05f;
+    }
+#endif
+#ifdef CT_PS5
+    /* port: the readout (hd2d_set_perf_osd): every 4 s, the frame's GPU
+       time and its three slowest passes, so a photo of the screen tells
+       what the file would. */
+    if (perf_osd && prof.frame[s] % 240 == 0) {
+        int top[3] = {0, 0, 0};
+        for (int r = 0; r < 3; r++)
+            for (int k = 1; k < prof.n[s]; k++) {
+                if (k == top[0] || k == top[1])
+                    continue;
+                if (!top[r] || t[k] - t[k - 1] > t[top[r]] - t[top[r] - 1])
+                    top[r] = k;
+            }
+        char msg[160];
+        int len = snprintf(msg, sizeof msg, "3D %d%% GPU %.1f CPU %.1f:",
+                           (int)lroundf(dyn_scale * 100.0f),
+                           (double)(t[prof.n[s] - 1] - t[0]) / 1e6,
+                           prof.submit_ms[s]);   /* from the start: it holds the other two */
+        for (int r = 0; r < 3 && top[r] && len < (int)sizeof msg; r++) {
+            char nm[24];
+            int j = 0;
+            const char *pn = prof.name[s][top[r]];
+            if (!strncmp(pn, "s3d_", 4))
+                pn += 4;   /* short: the line must fit the screen */
+            for (const char *c = pn; *c && j < 23; c++)
+                nm[j++] = *c == '_' ? ' ' : (char)toupper((unsigned char)*c);
+            nm[j] = 0;
+            len += snprintf(msg + len, sizeof msg - (size_t)len, " %s %.1f", nm,
+                            (double)(t[top[r]] - t[top[r] - 1]) / 1e6);
+        }
+        hd2d_osd(msg);
+    }
+#endif
     prof.n[s] = 0;
 }
 
@@ -406,6 +471,19 @@ const char *hd2d_preset_name(int p) { return p >= 0 && p < HD2D_PRESETS ? preset
 void hd2d_set_debug(int v) { debug_view = v < 0 || v >= HD2D_DEBUGS ? 0 : v; }
 int hd2d_debug(void) { return debug_view; }
 void hd2d_set_aspect(int a) { aspect_mode = a < 0 || a >= HD2D_ASPECTS ? 0 : a; }
+/* port: the depth of field's strength, a setting: off, low, full. The PS5
+   starts with it off (the blur at the top and bottom read as a fault on a
+   TV, menus included). */
+#ifdef CT_PS5
+static int dof_level;
+#else
+static int dof_level = 2;
+#endif
+void hd2d_set_dof(int level) { dof_level = level < 0 ? 0 : level > 2 ? 2 : level; }
+int hd2d_dof(void) { return dof_level; }
+static int smooth_3d = 1;   /* port: pixel-art smoothing in the 3D view */
+void hd2d_set_smooth(int on) { smooth_3d = on != 0; }
+int hd2d_smooth(void) { return smooth_3d; }
 int hd2d_aspect(void) { return aspect_mode; }
 void hd2d_set_timing(int on) { timing = on; }
 int hd2d_wants_scene(void) { return presets[cur_preset].scene3d; }
@@ -436,7 +514,9 @@ enum { P_EMIT, P_LIGHT, P_COC, P_DOFBLUR, P_BRIGHT, P_GAUSS, P_FINAL, P_COUNT,
        /* the world map's surfaces and shadow map (WORLD_MAP) */
        P3_WSCENE, P3_WSHADOW,
        /* port: asset packs' models (MODEL) */
-       P3_MSCENE, P3_MSHADOW, P_ALL };
+       P3_MSCENE, P3_MSHADOW,
+       /* port: the 3D target's clear, drawn (see s3d_render) */
+       P3_CLEAR, P_ALL };
 
 typedef struct {
     GLuint tex, fbo;
@@ -473,8 +553,10 @@ static struct {
         float amt;                  /* 0: the 2D path, 1: 3D; eased between (crossfade) */
         GLuint t_vram, t_cgram;     /* the console's VRAM (R16UI 256x128) and CGRAM */
         GLuint vao[2], vbo[2], ebo[2];   /* 0: the map, 1: this frame's sprites */
-        int map_ni, map_ni_floor, spr_ni;
+        int map_ni, map_ni_floor, spr_ni, spr_ni_low, blob_ni;   /* port: low: under OAM priority 3 */
         uint32_t map_gen;           /* scene generation the map mesh is from */
+        int map_cards;              /* port: the style it was built in */
+        float map_tilt;             /* port: and the tilt (the cards' shift) */
         int map_mode;               /* and its mode (field, world) */
         uint32_t empty_hash;        /* and which BG tiles were empty then */
         int have_map;
@@ -770,6 +852,15 @@ void hd2d_set_scene(const ct_scene *scene) { g.s3.scene = scene; }
 /* port: the user's 3D camera (hd2d_set_camera), kept apart from g, which
    hd2d_init clears; s3d_params_init starts from it. */
 static float user_tilt = 40.0f, user_zoom = 0.75f;
+static int user_cards = 1;   /* port: hd2d_set_3d_style */
+static int shadows_3d = 1;   /* port: hd2d_set_3d_shadows */
+static int depth_3d = 1;     /* port: hd2d_set_3d_depth: 0 full, 1 subtle, 2 flat */
+void hd2d_set_3d_depth(int d) { depth_3d = d < 0 ? 0 : d > 2 ? 2 : d; }
+int hd2d_3d_depth(void) { return depth_3d; }
+void hd2d_set_3d_shadows(int on) { shadows_3d = on != 0; }
+int hd2d_3d_shadows(void) { return shadows_3d; }
+void hd2d_set_3d_style(int cards) { user_cards = cards != 0; }
+int hd2d_3d_style(void) { return user_cards; }
 
 void hd2d_set_camera(float tilt, float zoom)
 {
@@ -880,7 +971,11 @@ static GLuint compile(GLenum type, const char *lib, const char *body, const char
 {
     const char *prefix = g.gles ? "#version 300 es\nprecision highp float;\nprecision highp int;\n"
                                   "precision highp usampler2D;\n"
+#ifdef CT_PS5   /* port: the console's cheaper paths in the shaders */
+                                : "#version 330 core\n#define CT_FAST 1\n";
+#else
                                 : "#version 330 core\n";
+#endif
     const char *src[3] = {prefix, lib ? lib : "", body};
     GLuint s = p_glCreateShader(type);
     p_glShaderSource(s, 3, src, NULL);
@@ -1372,6 +1467,10 @@ static void post(const settings *s, int px, int py, int pw, int ph, int ow, int 
     int pc = threeD ? P3_COC : P_COC, pb = threeD ? P3_BRIGHT : P_BRIGHT,
         pf = threeD ? P3_FINAL : P_FINAL;
     pic3d = threeD;
+    static const float dof_scale[3] = {0.0f, 0.4f, 1.0f};   /* port: hd2d_set_dof */
+    dof_tilt *= dof_scale[dof_level];
+    tilt *= dof_scale[dof_level];   /* the enlargement too: at Off no see-through gaps */
+    dof_depth *= dof_scale[dof_level];
     const float fore_depth = 0.22f;   /* light.frag's depthOf(C_FORE) */
     if (s->effects) {
         /* 3: blur amount, then the variable blur, H and V, both planes. */
@@ -1480,6 +1579,11 @@ static void post(const settings *s, int px, int py, int pw, int ph, int ow, int 
     p_glUniform3f(U(pf, "uShadowTint"), 0.92f, 0.98f, 1.08f);
     p_glUniform3f(U(pf, "uHighTint"), 1.06f, 1.0f, 0.9f);
     p_glUniform1f(U(pf, "uSideDim"), side_fill ? s->side_dim : 0.0f);
+#ifdef CT_PS5
+    p_glUniform1i(U(pf, "uFillTB"), 0);   /* port: the mirrored blur there read as a smear */
+#else
+    p_glUniform1i(U(pf, "uFillTB"), 1);
+#endif
     p_glUniform1f(U(pf, "uTime"), (float)(g.frame % 997) / 997.0f);
     p_glUniform1i(U(pf, "uDebug"), debug_view);
     if (threeD) {
@@ -1558,6 +1662,16 @@ static void s3d_params_init(void)
 
 /* Programs and the fixed-size resources. Failure only turns the 3D path
    off: the 2D presets don't need it. */
+/* port: the 3D target's clear as a draw: on the PS5's GL a glClear of
+   its color targets cost about as long as a frame (36 ms at 1080 lines,
+   in proportion to the pixels), a full-screen triangle almost nothing. */
+static const char clear3d_frag[] =
+    "in vec2 vUV;\n"
+    "uniform vec4 uC;\n"
+    "layout(location = 0) out vec4 o0;\n"
+    "layout(location = 1) out vec4 o1;\n"
+    "void main() { o0 = uC; o1 = uC; }\n";
+
 static int s3d_init(void)
 {
     s3d_params_init();
@@ -1588,6 +1702,7 @@ static int s3d_init(void)
         {P3_MSCENE, NULL, "#define MODEL\n", hd2d_src_scene3d_frag, "scene3d.frag (model)"},
         {P3_MSHADOW, NULL, "#define MODEL\n#define SHADOW_PASS\n", hd2d_src_scene3d_frag,
          "scene3d.frag (model shadow)"},
+        {P3_CLEAR, NULL, NULL, clear3d_frag, "clear3d.frag"},
     };
     /* The world map's vertex shader: scene3d.vert with WORLD_MAP; the
        models' with MODEL. */
@@ -1805,6 +1920,21 @@ static void m4_ortho(float *m, float r_, float t, float n, float f)
     memcpy(m, r, sizeof r);
 }
 
+/* port: the map layers' character tiles, all of their words (for the
+   settle after a battle: the same pictures as when the map was left). */
+static uint32_t s3d_chr_hash(const ct_scene *sc)
+{
+    uint32_t h = 2166136261u;
+    for (int l = 0; l < 2; l++) {
+        const ct_scene_layer *L = &sc->layer[l];
+        if (!L->present)
+            continue;
+        for (uint32_t k = 0; k < 1024u * (L->bpp == 2 ? 8u : 16u); k++)
+            h = (h ^ sc->vram[(L->chr_base + k) & 0x7FFF]) * 16777619u;
+    }
+    return h;
+}
+
 /* Which BG character tiles are empty: a mesh built while the map's tiles
    were still loading is rebuilt once they are in. */
 static uint32_t s3d_empty_hash(const ct_scene *sc)
@@ -1838,7 +1968,11 @@ static void s3d_upload(GLuint vbo, GLuint ebo, const s3d_mesh *m, GLenum usage)
 /* Geometry and the console's state for this frame. */
 static void s3d_update(const ct_scene *sc)
 {
-    s3d_params p = {g.s3.hmax, 1.0f};
+    s3d_params p = {g.s3.hmax, 1.0f, user_cards, 0.0f};
+    {   /* port: the cards' south shift for this tilt (rebuilt when it changes) */
+        float t = g.s3.tilt * 3.14159265f / 180.0f;
+        p.card_shift = t > 0.05f ? tanf(t) : 0.05f;
+    }
     float tilt = g.s3.tilt * 3.14159265f / 180.0f;
     /* Upright things are foreshortened by sin(tilt), floors by cos(tilt):
        sprites taller by their ratio keep the proportions they were drawn
@@ -1862,7 +1996,8 @@ static void s3d_update(const ct_scene *sc)
 
     uint32_t eh = s3d_empty_hash(sc);
     if (!g.s3.have_map || sc->map_generation != g.s3.map_gen || eh != g.s3.empty_hash ||
-        sc->mode != g.s3.map_mode || g.model_built != g.model_gen) {
+        sc->mode != g.s3.map_mode || g.model_built != g.model_gen || g.s3.map_cards != user_cards ||
+        g.s3.map_tilt != g.s3.tilt) {
         /* port: asset packs' models: their cell hook first, then (below,
            once the map's heights are known) their triangles */
         if (g.model_fn)
@@ -1889,6 +2024,8 @@ static void s3d_update(const ct_scene *sc)
         g.s3.map_ni_floor = g.s3.map.ni_floor;
         g.s3.map_gen = sc->map_generation;
         g.s3.map_mode = sc->mode;
+        g.s3.map_cards = user_cards;
+        g.s3.map_tilt = g.s3.tilt;
         g.s3.empty_hash = eh;
         g.s3.have_map = 1;
     }
@@ -1901,7 +2038,9 @@ static void s3d_update(const ct_scene *sc)
         s3d_build_sprites(sc, &p, &g.s3.spr);
         p_glBindVertexArray(g.s3.vao[1]);
         s3d_upload(g.s3.vbo[1], g.s3.ebo[1], &g.s3.spr, GL_STREAM_DRAW);
-        g.s3.spr_ni = g.s3.spr.ni;
+        g.s3.blob_ni = s3d_sprite_blobs() * 6;
+        g.s3.spr_ni = g.s3.spr.ni - g.s3.blob_ni;   /* the blobs after: drawn on their own */
+        g.s3.spr_ni_low = g.s3.spr.ni_floor;
     }
     /* port: asset packs: which of the map's tiles have replacements */
     g.pack3d_on = g.pack_entries > 0 && g.pack_lookup != NULL;
@@ -1923,6 +2062,41 @@ static int cloud_first, cloud_ni;   /* the overlay plane, in the sprite mesh */
 
 static void s3d_draw(int raised_only, int prog)
 {
+    if (!raised_only && prog == P3_SCENE && user_cards) {
+        /* port: layered cards, drawn in the console's order: the ground
+           and front layer, the sprites under priority 3 (depth tested
+           against those), then the overhead cards over them, then the
+           sprites over everything. A card and a sprite standing up through
+           it no longer cut each other in two (a sitter in a bench, a
+           walker under eaves): whichever the console drew in front is. */
+        p_glBindVertexArray(g.s3.vao[0]);
+        if (g.s3.map_ni_floor)
+            p_glDrawElements(GL_TRIANGLES, g.s3.map_ni_floor, GL_UNSIGNED_INT, NULL);
+        p_glBindVertexArray(g.s3.vao[1]);
+        if (g.s3.blob_ni) {   /* contact shadows: multiplied in, no depth writes */
+            p_glDepthMask(0);
+            p_glEnable(GL_BLEND);
+            p_glBlendFunc(GL_DST_COLOR, GL_ZERO);
+            p_glDrawElements(GL_TRIANGLES, g.s3.blob_ni, GL_UNSIGNED_INT,
+                             (const void *)(sizeof(uint32_t) * (size_t)g.s3.spr_ni));
+            p_glDisable(GL_BLEND);
+            p_glDepthMask(1);
+        }
+        if (g.s3.spr_ni_low)
+            p_glDrawElements(GL_TRIANGLES, g.s3.spr_ni_low, GL_UNSIGNED_INT, NULL);
+        p_glDepthFunc(GL_ALWAYS);
+        p_glBindVertexArray(g.s3.vao[0]);
+        if (g.s3.map_ni > g.s3.map_ni_floor)
+            p_glDrawElements(GL_TRIANGLES, g.s3.map_ni - g.s3.map_ni_floor, GL_UNSIGNED_INT,
+                             (const void *)(sizeof(uint32_t) * (size_t)g.s3.map_ni_floor));
+        p_glBindVertexArray(g.s3.vao[1]);
+        if (g.s3.spr_ni > g.s3.spr_ni_low)
+            p_glDrawElements(GL_TRIANGLES, g.s3.spr_ni - g.s3.spr_ni_low, GL_UNSIGNED_INT,
+                             (const void *)(sizeof(uint32_t) * (size_t)g.s3.spr_ni_low));
+        p_glDepthFunc(GL_LESS);
+        p_glBindVertexArray(g.vao);
+        return;
+    }
     p_glBindVertexArray(g.s3.vao[0]);
     int first = raised_only ? g.s3.map_ni_floor : 0;
     int world = prog == P3_WSCENE || prog == P3_WSHADOW;
@@ -2148,6 +2322,19 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
 {
     float a = s->effects ? scene_amt : 0.0f;
     float rs = user_render_scale > 0.0f ? user_render_scale : s->render_scale;
+#ifdef CT_PS5
+    /* port: the PS5's Auto: the diorama drawn at no more than 1080 lines
+       and upscaled with FSR (30 fps at 4K full size). Not fewer: at 720
+       the pixel art came out uneven and blocky in the 3D view. */
+    if (user_render_scale <= 0.0f && ph > 1080) {
+        float cap = 1080.0f / (float)ph;
+        rs = rs > 0.0f && rs < cap ? rs : cap;
+    }
+    /* port: and below that, the dynamic resolution (prof_flush): only as
+       far down as needed to keep 60 fps, never under 810 lines' worth. */
+    if (user_render_scale <= 0.0f && dyn_scale < 1.0f)
+        rs = (rs > 0.0f ? rs : 1.0f) * dyn_scale;
+#endif
     int rw = pw, rh = ph;
     if (rs > 0.0f && rs < 0.995f) {
         rw = (int)lroundf(pw * rs);
@@ -2157,6 +2344,10 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     }
     /* (its targets kept while menus ease it off: no remaking them each time) */
     float ao_base = user_ao >= 0.0f ? user_ao : s->ao3d, ao_amt = ao_base * a;
+#ifdef CT_PS5
+    if (user_ao < 0.0f)   /* port: Auto is off on the PS5 (the costliest pass) */
+        ao_base = ao_amt = 0.0f;
+#endif
     if (g.float_type != GL_HALF_FLOAT)   /* its depths need half floats */
         ao_base = ao_amt = 0.0f;
     int div = user_ao_div ? user_ao_div : s->ao_div > 0 ? s->ao_div : 2;
@@ -2173,7 +2364,12 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     float zoom = world ? g.s3.wzoom : g.s3.zoom;
     float tilt_deg = (world ? g.s3.wtilt : g.s3.tilt) + g.s3.dtilt;   /* port: + the gyro's offset */
     tilt_deg = tilt_deg < 0 ? 0 : tilt_deg > 80 ? 80 : tilt_deg;
-    float tilt = tilt_deg * 3.14159265f / 180.0f, fovy = g.s3.fov * 3.14159265f / 180.0f;
+    /* port: the field's layered cards with a long lens (14 degrees, from
+       further off: the same view): with the wide one, cards and sprites
+       drifted apart as the camera moved, and upright sprites leaned at the
+       sides of the screen. */
+    float fov_deg = !world && user_cards && g.s3.fov > 14.0f ? 14.0f : g.s3.fov;
+    float tilt = tilt_deg * 3.14159265f / 180.0f, fovy = fov_deg * 3.14159265f / 180.0f;
     float aspect = (float)pw / (float)ph;   /* the picture's, at any render scale */
     float dist = 128.0f / zoom / (tanf(fovy * 0.5f) * aspect);
     float at[3] = {(float)sc->camera_x + 128.0f, 0.0f, (float)sc->camera_y + 120.0f};
@@ -2246,8 +2442,10 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     p_glDepthFunc(world ? GL_LEQUAL : GL_LESS);   /* the world map's front layer: on the same corners */
     p_glDepthMask(1);
 
-    /* Shadow map: what stands up (walls, roofs, sprites). */
+    /* Shadow map: what stands up (walls, roofs, sprites). (port: none
+       with the 3D shadows setting off: the scene's shader skips the map.) */
     int PS = world ? P3_WSHADOW : P3_SHADOW;
+    if (shadows_3d) {
     p_glUseProgram(g.prog[PS]);
     p_glUniformMatrix4fv(U(PS, "uMVP"), 1, GL_FALSE, lmvp);
     p_glUniformMatrix4fv(U(PS, "uLightMVP"), 1, GL_FALSE, lmvp);
@@ -2269,6 +2467,7 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
         models_draw(P3_MSHADOW, (const float (*)[2])copies, n_copies);
     }
     p_glDisable(GL_POLYGON_OFFSET_FILL);
+    }
     prof_mark("s3d_shadow");
 
     /* The surfaces. */
@@ -2277,9 +2476,21 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     p_glBindFramebuffer(GL_FRAMEBUFFER, g.s3.fbo);
     p_glViewport(0, 0, rw, rh);
     float bright = sc->brightness / 15.0f;
+#ifdef CT_PS5
+    p_glDisable(GL_DEPTH_TEST);
+    p_glUseProgram(g.prog[P3_CLEAR]);
+    p_glUniform4f(U(P3_CLEAR, "uC"), void_[0] * bright, void_[1] * bright, void_[2] * bright,
+                  1.0f);
+    p_glBindVertexArray(g.vao);
+    draw_to(g.s3.fbo, rw, rh);
+    p_glClear(GL_DEPTH_BUFFER_BIT);   /* (a depth clear is quick there) */
+    p_glEnable(GL_DEPTH_TEST);
+#else
     p_glClearColor(void_[0] * bright, void_[1] * bright, void_[2] * bright, 1.0f);
     p_glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     p_glClearColor(0, 0, 0, 0);
+#endif
+    prof_mark("s3d_clear");   /* port: the scene pass in parts, for the readout */
     /* port: the models' program gets the same (asset packs) */
     for (int pass = g.m_ni ? 1 : 0; pass >= 0; pass--) {
     int P = pass ? P3_MSCENE : world ? P3_WSCENE : P3_SCENE;
@@ -2309,7 +2520,17 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     p_glUniform3f(U(P, "uEye"), eye[0], eye[1], eye[2]);
     p_glUniform2f(U(P, "uCam"), (float)sc->camera_x, (float)sc->camera_y);
     p_glUniform4f(U(P, "uFog"), fog[0], fog[1], fog[2], 0.6f * s->haze / 0.5f);
-    p_glUniform4f(U(P, "uDepth"), dist, dist * 1.6f, bright, 0.55f * s->shadow * a);
+    p_glUniform4f(U(P, "uDepth"), dist, dist * 1.6f, bright,
+                  shadows_3d ? 0.55f * s->shadow * a : 0.0f);
+    if (!pass)
+        p_glUniform1i(U(P, "uSmooth"), smooth_3d);
+    if (P == P3_SCENE) {   /* port: the cards' snap toward the console's picture */
+        static const float snap[3] = {0.0f, 0.8f, 1.0f};
+        float t = g.s3.map_tilt * 3.14159265f / 180.0f;
+        p_glUniform2f(U(P, "uCard"), user_cards ? snap[depth_3d] : 0.0f,
+                      t > 0.05f ? tanf(t) : 0.05f);
+        p_glUniform3f(U(P, "uEyeV"), eye[0], eye[1], eye[2]);
+    }
     p_glUniform4f(U(P, "uMisc"), s->point_light * a * (0.25f + 0.75f * dark_amt), dist * 1.25f,
                   dist * 3.5f, 1.0f / S3D_SHADOW_SIZE);
     if (pass) {
@@ -2332,6 +2553,7 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
         p_glUniform2f(U(P, "uCloudClear"), eye[0] + (at[0] - eye[0]) * t,
                       eye[2] + (at[2] - eye[2]) * t);
     }
+    prof_mark("s3d_setup");
     s3d_draw(0, P);
     }
     int P = world ? P3_WSCENE : P3_SCENE;
@@ -2532,6 +2754,35 @@ void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behi
                    black screen with text), so the 3D view would show a
                    map nobody sees */
                 !(st && !((st->main_enabled | st->sub_enabled) & 3));
+    /* port: back from a battle, the map settles first: the game says it
+       is a map view a moment before its tiles are all back in video
+       memory, and the 3D view, which reads them from there, showed the
+       battle's graphics scrambled for a second. After a long stretch of
+       something else (half a second or more: a battle, not a door or a
+       fade), the console's own picture until the map view has lasted 2/3
+       of a second; then the 3D fades in. Doors and room changes (the game
+       fades to black over its loading) go straight on as before. */
+    {
+        static int away, stable, settling;
+        static uint32_t eh_left;   /* the map's tiles as it was left */
+        int map_view = sc && sc->vram && (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD);
+        if (!map_view) {
+            stable = 0;
+            if (++away >= 30)
+                settling = 1;
+        } else {
+            away = 0;
+            stable = stable < 1000 ? stable + 1 : stable;
+            uint32_t eh = s3d_chr_hash(sc);
+            /* the same tiles as before (a menu closed): no wait */
+            if (stable >= 40 || (settling && eh == eh_left && stable >= 2))
+                settling = 0;
+            if (!settling)
+                eh_left = eh;
+        }
+        if (want3 && settling && g.s3.amt <= 0.0f)
+            want3 = 0;
+    }
     if (!s->scene3d || (!want3 && (g.s3.pic_w != pw || g.s3.pic_h != ph)))
         g.s3.amt = 0.0f;
     else

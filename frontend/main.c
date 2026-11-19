@@ -1170,6 +1170,20 @@ static void set_preset(void *u, int v)
         sched_set_behind(hd2d_wants_behind());
 }
 static const char *const aspect_labels[HD2D_ASPECTS] = {"4:3", "Pixel 8:7", "Stretch"};
+static const char *const dof_labels[3] = {"Off", "Low", "Full"},
+                         *const dof_values[3] = {"off", "low", "full"};
+static int get_dof(void *u) { (void)u; return hd2d_dof(); }
+static void set_dof(void *u, int v) { (void)u; hd2d_set_dof(v); }
+static int get_perf(void *u) { (void)u; return hd2d_perf_osd(); }
+static void set_perf(void *u, int v) { (void)u; hd2d_set_perf_osd(v); }
+static const char *const depth3d_labels[3] = {"Full", "Subtle", "Flat"},
+                         *const depth3d_values[3] = {"full", "subtle", "flat"};
+static int get_depth3d(void *u) { (void)u; return hd2d_3d_depth(); }
+static void set_depth3d(void *u, int v) { (void)u; hd2d_set_3d_depth(v); }
+static int get_shadows3d(void *u) { (void)u; return hd2d_3d_shadows(); }
+static void set_shadows3d(void *u, int v) { (void)u; hd2d_set_3d_shadows(v); }
+static int get_smooth(void *u) { (void)u; return hd2d_smooth(); }
+static void set_smooth(void *u, int v) { (void)u; hd2d_set_smooth(v); }
 static int get_aspect(void *u) { (void)u; return hd2d_aspect(); }
 static void set_aspect(void *u, int v) { (void)u; hd2d_set_aspect(v); }
 static int get_cam_tilt(void *u)
@@ -1310,7 +1324,7 @@ static const char *const pacing_labels[3] = {"Auto", "Timer", "Vsync"},
 #ifdef CT_PS5_GL
 /* port: the PS5 GPU build's output size (the SDL bridge reads
    CT_PS5_DISPLAY_HEIGHT when the video starts: the next start). */
-static int ps5_display = 2;   /* 4K */
+static int ps5_display = 0;   /* 1080p: the 3D diorama ran at 30 fps at 4K */
 static const char *const ps5_display_labels[3] = {"1080p", "1440p", "4K"},
                          *const ps5_display_values[3] = {"1080", "1440", "2160"};
 static int get_ps5_display(void *u) { (void)u; return ps5_display; }
@@ -1684,6 +1698,37 @@ static void register_settings(void)
         .set = set_preset,
         .help = "Original pixels, or the HD-2D renderer: light, depth of field, bloom; the 3D "
                 "diorama rebuilds maps in 3D. Used by the HD-2D renderer. (F1, R3)"});
+    settings_register(&(setting){
+        .key = "dof", .label = "Depth of field", .category = "Look", .type = SETTING_ENUM,
+        .options = dof_labels, .values = dof_values, .count = 3, .get = get_dof, .set = set_dof,
+        .enabled = on_hd2d,
+        .help = "The miniature-model blur towards the top and bottom of the picture: off, a "
+                "little, or the look's full amount."});
+    settings_register(&(setting){
+        .key = "depth_3d", .label = "3D depth", .category = "Look", .type = SETTING_ENUM,
+        .options = depth3d_labels, .values = depth3d_values, .count = 3, .get = get_depth3d,
+        .set = set_depth3d, .enabled = on_hd2d,
+        .help = "How far the 3D diorama's raised layers (treetops, roofs, table tops) move "
+                "against the ground as the camera moves. Full: the most depth, with seams "
+                "inside tables and tents. Flat: lined up exactly, depth from light and shadow."});
+    settings_register(&(setting){
+        .key = "shadows_3d", .label = "3D shadows", .category = "Look", .type = SETTING_BOOL,
+        .get = get_shadows3d, .set = set_shadows3d, .enabled = on_hd2d,
+        .help = "Shadows cast by treetops, roofs and characters in the 3D diorama. Off is "
+                "faster."});
+    settings_register(&(setting){
+        .key = "smooth_3d", .label = "3D texture smoothing", .category = "Look",
+        .type = SETTING_BOOL, .get = get_smooth, .set = set_smooth, .enabled = on_hd2d,
+        .help = "Pixel-art anti-aliasing in the 3D diorama: tilted and distant tiles stay even "
+                "instead of crunchy. Turn off for hard pixels or a little more speed."});
+#ifdef CT_PS5
+    settings_register(&(setting){
+        .key = "perf_readout", .label = "Performance readout", .category = "Look",
+        .type = SETTING_BOOL, .get = get_perf, .set = set_perf, .enabled = on_hd2d,
+        .help = "Every few seconds, the time each frame takes on the GPU and CPU and its "
+                "three slowest steps, at the bottom of the picture. Under 16.7 ms is full "
+                "speed."});
+#endif
     settings_register(&(setting){.key = "aspect", .label = "Aspect", .category = "Look",
                                  .type = SETTING_ENUM, .options = aspect_labels,
                                  .count = HD2D_ASPECTS, .get = get_aspect, .set = set_aspect,
@@ -1785,11 +1830,12 @@ static void register_settings(void)
 #endif
 #ifdef CT_PS5_GL
     settings_register(&(setting){
-        .key = "ps5_display", .label = "Resolution", .category = "Display", .type = SETTING_ENUM,
+        .key = "ps5_resolution", .label = "Resolution", .category = "Display", .type = SETTING_ENUM,
         .options = ps5_display_labels, .values = ps5_display_values, .count = 3,
         .get = get_ps5_display, .set = set_ps5_display, .flags = SETTING_RESTART,
         .help = "The picture the PS5 draws; the console scales it to the TV. 4K is the "
-                "sharpest, 1080p the lightest. Takes effect on the next start."});
+                "sharpest (the 3D diorama is drawn at 1080 lines and upscaled), 1080p the "
+                "lightest. Takes effect on the next start."});
 #endif
     settings_register(&(setting){
         .key = "pacing", .label = "Frame pacing", .category = "Display", .type = SETTING_ENUM,
@@ -2350,6 +2396,11 @@ static void choose_pacing(void)
        check in on_frame, and it is not yet measured on a real Game Mode
        display. */
     int want = !fast && pace_opt == PACE_VSYNC;
+#ifdef CT_PS5_GL
+    /* port: the PS5's GPU build tears without vsync (seen on a TV); its
+       output is a steady 60 Hz, so auto means vsync there */
+    want |= !fast && pace_opt == PACE_AUTO;
+#endif
     int ok = 0;
     if (want)
         ok = hd2d_mode ? !SDL_GL_SetSwapInterval(1) : ren && !SDL_RenderSetVSync(ren, 1);
@@ -3083,6 +3134,9 @@ int main(int argc, char **argv)
     settings_load();   /* port: saved HD-2D settings; options below override */
 #ifdef CT_PS5_GL
     setenv("CT_PS5_DISPLAY_HEIGHT", ps5_display_values[ps5_display], 1);   /* before SDL_Init */
+    /* port: the renderer's per-pass timings, every 30th frame, while the
+       3D diorama's speed on the console is being tuned (docs/HD2D.md) */
+    setenv("CT_HD2D_PROFILE", "/data/ct-recomp/hd2d-profile.txt", 0);
     fprintf(stderr, "ct_ps5: display %s\n", ps5_display_labels[ps5_display]);
 #endif
     for (int k = 1; k < argc; k++) {
@@ -3464,8 +3518,11 @@ int main(int argc, char **argv)
         }
         fprintf(stderr, "ct_sdl: game module %s: %u functions\n", module_path, ct_func_count);
     }
-    if (!no_save)   /* port: the save RAM from disk (saves.h) */
-        saves_open(save_path, game_id);
+    if (!no_save && saves_open(save_path, game_id)) {   /* port: the save RAM from disk (saves.h) */
+#ifdef CT_PS5
+        ps5_notify("CT5: saving is off this time (see ct-recomp.log)");
+#endif
+    }
     char title[22];   /* ROM header title, $FFC0, 21 bytes, space padded */
     memcpy(title, bus_rom() + 0xFFC0, 21);
     title[21] = 0;

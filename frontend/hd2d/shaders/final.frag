@@ -14,6 +14,7 @@ uniform sampler2D uDof;      // half size: background plane blurred, a = coc
 uniform sampler2D uFgDof;    // half size: foreground plane blurred, premultiplied
 uniform vec4 uFocus;         // as coc.frag: for the foreground's blur amount
 uniform vec3 uDof3;
+uniform int uFillTB;      // mirror-fill the bars above and below (0: black)
 uniform sampler2D uBloomA;   // quarter size
 uniform sampler2D uBloomB;   // eighth size
 uniform sampler2D uSoft;     // eighth size, unthresholded: side fill
@@ -86,6 +87,8 @@ vec3 shade(vec2 fc)
     bool inside = all(greaterThanEqual(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)));
 
     if (!inside) {
+        if (uFillTB == 0 && (uv.y < 0.0 || uv.y >= 1.0))
+            return vec3(0.0);   // black bars above and below: no blurred copy there
         // Side fill: the soft copy mirrored at the picture's edge (a blurred
         // reflection, not stretched edge columns), dimmed with distance.
         // Bars above and below (a tall window) mirror and fade the same

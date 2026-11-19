@@ -91,6 +91,7 @@ static uint16_t tile_of[32768];   /* VRAM word -> 1 + line * 64 + row * 32 + col
 static uint16_t tiles_set[CT_TEXT_LINES * CT_TEXT_ROWS * CT_TEXT_COLS];
 static int n_tiles_set;
 static uint8_t mask[W * H];       /* 1 + line: a console glyph pixel of a line drawn here */
+static uint8_t glyph_px[W * H];   /* port: any console glyph pixel, kept ones too */
 static uint8_t keep[CT_TEXT_LINES][LINE_PX + 16];   /* columns whose console glyph stays */
 static uint8_t out_px[W * H * 4], out_layers[W * H];
 static uint8_t *ov;
@@ -344,6 +345,7 @@ int hdtext_frame(const ct_text *t, const sched_prov_px *prov, const sched_vmem *
        the two nearest on its row or its column, whichever are closer (a
        word's shadowed top row can be a long unbroken run). */
     memcpy(out_px, bgrx, sizeof out_px);
+    memcpy(glyph_px, mask, sizeof glyph_px);
     memcpy(out_layers, layers, sizeof out_layers);
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
@@ -385,6 +387,28 @@ int hdtext_frame(const ct_text *t, const sched_prov_px *prov, const sched_vmem *
             for (int c = 0; c < 3; c++)
                 out_px[i * 4 + c] = (uint8_t)((bgrx[a * 4 + c] + bgrx[b * 4 + c] + 1) / 2);
             out_layers[i] = layers[a];
+            /* port: better, the same spot in a tile beside it on the row (8,
+               16.. pixels away) when it is box, not frame (near that average):
+               the box's dithered pattern carries on instead of a flat fill,
+               which showed as pale outlines of the old words. */
+            for (int d = 8; d <= 64; d += 8) {
+                int cand[2] = {x + d < x1 ? i + d : -1, x - d >= x0 ? i - d : -1}, found = 0;
+                for (int q = 0; q < 2 && !found; q++) {
+                    int j = cand[q];
+                    if (j < 0 || glyph_px[j])
+                        continue;
+                    int diff = 0;
+                    for (int c = 0; c < 3; c++)
+                        diff += abs((int)bgrx[j * 4 + c] - (int)out_px[i * 4 + c]);
+                    if (diff < 120) {
+                        memcpy(&out_px[i * 4], &bgrx[j * 4], 3);
+                        out_layers[i] = layers[j];
+                        found = 1;
+                    }
+                }
+                if (found)
+                    break;
+            }
         }
     r->bgrx = out_px;
     r->layers = out_layers;

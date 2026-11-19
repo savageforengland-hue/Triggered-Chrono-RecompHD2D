@@ -59,7 +59,16 @@ typedef struct {
     int hmax;        /* wall height cap, cells */
     float stretch;   /* sprite billboards' height per screen px (upright things
                         look shorter from above than the floor does) */
+    int cards;       /* port: layered cards (the 3DS ports' trick): no walls or
+                        boxes; each layer lies flat at its own height, the
+                        tiles drawn over sprites highest (S3D_CARD_*) */
+    float card_shift;  /* port: cards: how far south a card moves per px it is lifted,
+                          so it sits where the original drew it from the camera's
+                          tilt (tan of the tilt from straight down; 0: 1) */
 } s3d_params;
+
+#define S3D_CARD_FRONT 3    /* the front layer over the back one, px */
+#define S3D_CARD_OVER  16   /* tiles drawn over sprites (canopies, roofs), px */
 
 void s3d_mesh_free(s3d_mesh *m);
 
@@ -72,6 +81,10 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m);
    standing at its object's foot point (entries no object owns stand at
    their own bottom edge). Returns the number of quads. */
 int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m);
+/* port: how many quads at the end of that mesh are contact shadows (flat
+   under each character's feet, S3D_OBJ | S3D_N_WATER; the shader draws
+   them as a soft dark ellipse, to be blended by multiplying). */
+int s3d_sprite_blobs(void);
 
 /* One textured quad: corner tl, then a step of 8 px along u (the tile's
    +x) and along v (its +y, downward in the image); tile is the packed

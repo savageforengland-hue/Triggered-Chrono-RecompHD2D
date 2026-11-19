@@ -59,6 +59,8 @@ set(CT_WARN -Wall -Wextra -Wpedantic)
 if(PS5)
     set(CT_PS5 ON)
     add_compile_definitions(CT_PS5)
+    # Settings, saves, save states, packs under /data (frontend/ps5.c).
+    add_compile_definitions(SDL_GetPrefPath=ps5_pref_path)
     # An installed title (packaging/ps5/title), not a payload.
     option(CT_PS5_TITLE "Build for a PS5 title (eboot.bin), not an ELF payload" OFF)
     if(CT_PS5_TITLE)

@@ -7,6 +7,10 @@
 
 #include "ps5.h"
 
+#include <SDL.h>
+#undef SDL_GetPrefPath   /* below: SDL's own, to find what to bring over */
+extern DECLSPEC char *SDLCALL SDL_GetPrefPath(const char *org, const char *app);
+
 #include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -144,6 +148,81 @@ void ps5_init(const char *argv0)
     fprintf(stderr, "ct_ps5: log %s (program folder \"%s\")\n", logged ? path : "(none)",
             self_dir);
     sceSystemServiceHideSplashScreen();
+}
+
+/* Copy the regular files of from/ into to/ that to/ doesn't have yet, and
+   one level of folders (states/). */
+static void copy_missing(const char *from, const char *to, int depth)
+{
+    DIR *d = opendir(from);
+    if (!d)
+        return;
+    mkdir(to, 0777);
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.')
+            continue;
+        char src[1024], dst[1024];
+        snprintf(src, sizeof src, "%s/%s", from, e->d_name);
+        snprintf(dst, sizeof dst, "%s/%s", to, e->d_name);
+        if (is_dir(src)) {
+            if (depth > 0)
+                copy_missing(src, dst, depth - 1);
+            continue;
+        }
+        if (!is_file(src) || is_file(dst))
+            continue;
+        FILE *in = fopen(src, "rb"), *out = in ? fopen(dst, "wb") : NULL;
+        char buf[65536];
+        size_t n;
+        while (out && (n = fread(buf, 1, sizeof buf, in)) > 0)
+            fwrite(buf, 1, n, out);
+        if (out)
+            fclose(out);
+        if (in)
+            fclose(in);
+        fprintf(stderr, "ct_ps5: brought %s over to %s\n", src, dst);
+    }
+    closedir(d);
+}
+
+/* SDL_GetPrefPath on the PS5 (CMake renames every call to this):
+   /data/<org>/<app>/, the folder the log is written in, so known to be
+   writable by an installed title and reachable over FTP. SDL's own PS5
+   folder (/user/home/<user>/...) kept saves from coming back on 13.20.
+   What is there already is copied over once. */
+char *ps5_pref_path(const char *org, const char *app)
+{
+    if (!app) {
+        SDL_InvalidParamError("app");
+        return NULL;
+    }
+    char path[512];
+    snprintf(path, sizeof path, "/data/%s%s%s/", org && *org ? org : "",
+             org && *org ? "/" : "", app);
+    int existed = is_dir(path);
+    for (char *p = path + 1; *p; p++)   /* every folder on the way */
+        if (*p == '/') {
+            *p = 0;
+            mkdir(path, 0777);
+            *p = '/';
+        }
+    if (!existed) {   /* first use: bring over SDL's folder */
+        char *old = SDL_GetPrefPath(org, app);
+        if (old) {
+            size_t n = strlen(old);
+            if (n && old[n - 1] == '/')
+                old[n - 1] = 0;
+            char to[512];
+            snprintf(to, sizeof to, "%.*s", (int)strlen(path) - 1, path);
+            copy_missing(old, to, 1);
+            SDL_free(old);
+        }
+    }
+    char *out = SDL_strdup(path);
+    if (!out)
+        SDL_OutOfMemory();
+    return out;
 }
 
 /* rom.sfc in dir, else the first *.sfc / *.smc there: 1 with its path in

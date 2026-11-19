@@ -32,15 +32,20 @@ static ct_scene_cell cells[CT_SCENE_MAX_CELLS * CT_SCENE_MAX_CELLS];
 
 enum { MW = 6, MH = 8, WALL_X = 2, RUN_A = 1, RUN_B = 4 };
 
-static void make_scene(ct_scene *s)
+static void make_scene_tiles(ct_scene *s, int wall_tile)
 {
     memset(s, 0, sizeof *s);
-    /* Tile 1 at character base $1000 has pixels; tile 0 is empty. */
-    for (int k = 0; k < 16; k++)
+    /* Tiles 1 (ground) and 2 (wall) at character base $1000 have pixels;
+       tile 0 is empty. */
+    for (int k = 0; k < 16; k++) {
         vram[0x1000 + 16 + k] = 0x8181;
+        vram[0x1000 + 32 + k] = 0x4242;
+    }
     for (int y = 0; y < 2 * MH; y++)
-        for (int x = 0; x < 2 * MW; x++)
-            tiles[1][y * CT_SCENE_STRIDE + x] = 0x0001;   /* BG2: tile 1; BG1: empty */
+        for (int x = 0; x < 2 * MW; x++) {
+            int wall = x / 2 == WALL_X && y / 2 >= RUN_A && y / 2 <= RUN_B;
+            tiles[1][y * CT_SCENE_STRIDE + x] = (uint16_t)(wall ? wall_tile : 1);   /* BG1: empty */
+        }
     for (int y = 0; y < MH; y++)
         for (int x = 0; x < MW; x++) {
             int solid = x == WALL_X && y >= RUN_A && y <= RUN_B;
@@ -60,6 +65,11 @@ static void make_scene(ct_scene *s)
     s->obj_chr[1] = 0x2000;
     s->obj_size[0] = 8;
     s->obj_size[1] = 16;
+}
+
+static void make_scene(ct_scene *s)
+{
+    make_scene_tiles(s, 2);
 }
 
 static int has_vertex(const s3d_mesh *m, float x, float y, float z)
@@ -98,13 +108,62 @@ static void test_map(void)
     for (int k = 0; k < m.nv; k += 4) {
         opaque += (m.v[k].tile & S3D_OPAQUE) != 0;
         raised += (m.v[k].tile & S3D_RAISED) != 0;
-        CHECK((m.v[k].tile & S3D_ADDR_MASK) == 0x1010, "tile address %x", m.v[k].tile);
+        int raised_q = (m.v[k].tile & S3D_RAISED) != 0;
+        CHECK((m.v[k].tile & S3D_ADDR_MASK) == (raised_q ? 0x1020u : 0x1010u), "tile address %x",
+              m.v[k].tile);
     }
     CHECK(raised == (4 + 6) * 4, "raised %d", raised);
     /* The back layer is opaque (color 0: the backdrop) except where it
        rises as a cut-out: posts, trunks and canopies show what is behind. */
     CHECK(opaque == quads - 4 * 4, "opaque %d of %d", opaque, quads);
     s3d_mesh_free(&m);
+}
+
+/* port: blocked cells drawn with the walkable ground's own tiles (an
+   invisible wall, grass between trees) stay flat. */
+static void test_ground_stays_flat(void)
+{
+    static ct_scene s;
+    make_scene_tiles(&s, 1);
+    s3d_mesh m = {0};
+    s3d_params p = {3, 1.0f};
+    int quads = s3d_build_map(&s, &p, &m);
+    CHECK(quads == MW * MH * 4 && m.ni_floor / 6 == quads, "all floor: %d quads, %d floor", quads,
+          m.ni_floor / 6);
+    CHECK(s3d_height_at(WALL_X, RUN_B) == 0, "no box");
+    s3d_mesh_free(&m);
+}
+
+/* port: layered cards: nothing stands up; tiles drawn over sprites lie
+   S3D_CARD_OVER px up, moved south as far, with the ground left under
+   them. */
+static void test_cards(void)
+{
+    static ct_scene s;
+    make_scene(&s);
+    /* The wall cell's top row: priority (over sprites), as a canopy. */
+    for (int x = 2 * WALL_X; x < 2 * WALL_X + 2; x++)
+        for (int y = 2 * RUN_A; y < 2 * RUN_A + 2; y++)
+            tiles[1][y * CT_SCENE_STRIDE + x] |= 0x2000;
+    s3d_mesh m = {0};
+    s3d_params p = {3, 1.0f, 1};
+    int quads = s3d_build_map(&s, &p, &m);
+    /* Every cell flat on the ground, plus the canopy cell's card. */
+    CHECK(quads == (MW * MH + 1) * 4, "card quads %d", quads);
+    CHECK(m.ni_floor / 6 == MW * MH * 4, "card floor quads %d", m.ni_floor / 6);
+    int flat = 1, bad_y = 0;
+    for (int k = 0; k < m.nv; k++) {
+        flat &= ((m.v[k].tile >> S3D_NORMAL_SHIFT) & 7u) == S3D_N_UP;
+        bad_y += m.v[k].y > 0.2f && fabsf(m.v[k].y - S3D_CARD_OVER) > 0.2f;
+    }
+    CHECK(flat, "every card faces up");
+    CHECK(!bad_y, "%d vertices off the ground and card heights", bad_y);
+    CHECK(has_vertex(&m, WALL_X * 16, S3D_CARD_OVER, RUN_A * 16 + S3D_CARD_OVER), "the canopy card");
+    CHECK(has_vertex(&m, WALL_X * 16, 0, RUN_A * 16), "the ground under it");
+    CHECK(s3d_height_at(WALL_X, RUN_B) == 0, "no boxes");
+    s3d_mesh_free(&m);
+    for (int k = 0; k < CT_SCENE_STRIDE * 2 * CT_SCENE_MAX_CELLS; k++)
+        tiles[1][k] &= (uint16_t)~0x2000;
 }
 
 static void test_sprites(void)
@@ -115,8 +174,8 @@ static void test_sprites(void)
     s.camera_y = 200;
     for (int e = 0; e < 128; e++)
         oam[2 * e] = 0xF0 << 8;   /* hidden */
-    /* Entry 3: 16x16 at screen (40, 60); its object's foot is at screen
-       (48, 74): 2 px above the sprite's bottom, so it is lifted 2 px. */
+    /* Entry 3: 16x16 at screen (40, 60); its object's position says
+       (48, 74), but the foot is the entries' own bottom row (76). */
     oam[2 * 3] = (uint16_t)(60 << 8 | 40);
     oam[2 * 3 + 1] = 0x0002;
     oam[0x100 + 0] = 2 << 6;      /* entry 3: large */
@@ -127,10 +186,11 @@ static void test_sprites(void)
     s3d_mesh m = {0};
     s3d_params p = {3, 1.0f};
     int quads = s3d_build_sprites(&s, &p, &m);
-    CHECK(quads == 4 + 1, "sprite quads %d", quads);
-    /* Its top-left tile: x = camera + 40, top at 74 + 2 - 60 = 16 px up, at the foot's z. */
-    CHECK(has_vertex(&m, 140, 16, 274.0f + 124 * 0.004f), "billboard top-left");
-    CHECK(has_vertex(&m, 156, 0, 274.0f + 124 * 0.004f), "billboard foot");
+    /* 4 pieces, the unowned one, and the object's contact shadow (last). */
+    CHECK(quads == 4 + 1 + 1 && s3d_sprite_blobs() == 1, "sprite quads %d", quads);
+    /* Its top-left tile: x = camera + 40, top at 76 - 60 = 16 px up, at z = camera + 76. */
+    CHECK(has_vertex(&m, 140, 16, 276.0f + 124 * 0.004f), "billboard top-left");
+    CHECK(has_vertex(&m, 156, 0, 276.0f + 124 * 0.004f), "billboard foot");
     /* Unowned: stands at its own bottom (screen row 28 -> z = 228). */
     CHECK(has_vertex(&m, 110, 8, 228.0f + 118 * 0.004f), "unowned piece");
     CHECK((m.v[0].tile & S3D_OBJ) && ((m.v[0].tile >> S3D_NORMAL_SHIFT) & 7) == S3D_N_SPRITE,
@@ -262,6 +322,8 @@ static void test_world(void)
 int main(void)
 {
     test_map();
+    test_ground_stays_flat();
+    test_cards();
     test_sprites();
     test_world();
     if (fails)

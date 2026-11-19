@@ -16,7 +16,9 @@
  *   where the original drew it: a roof, or the top of a hedge.
  * - A run blocked deeper than its wall is a box: where neighboring
  *   columns' boxes differ in height, side walls close it, textured with
- *   the wall's own tiles. Other runs (posts, trunks, canopies, arches)
+ *   the box's top folded down over the edge (else the wall's own tiles).
+ * - Blocked cells drawn only with the surrounding walkable ground's tiles
+ *   stay flat (port: no blocks of grass). Other runs (posts, trunks, canopies, arches)
  *   stay thin cut-outs.
  * - Overhead tiles over walkable cells belong to the blocked run north of
  *   them (a canopy over its trunk, eaves behind a roof), and only those
@@ -143,6 +145,7 @@ typedef struct {
     uint8_t solid[MAXC][MAXC];
     uint8_t boxed[MAXC][MAXC];      /* its floor is inside a box */
     uint8_t hooked[MAXC][MAXC];     /* the cell hook drew it (or nothing) */
+    float card_shift;               /* port: s3d_params.card_shift (cards) */
 } build_ctx;
 
 static build_ctx ctx;   /* the last build's, also for placing sprites */
@@ -244,6 +247,56 @@ static void raised_place(const build_ctx *c, place *p, int x, int y)
                      {1, 0, 0}, {0, 0, 1}, S3D_N_UP, S3D_RAISED};
 }
 
+/* port: a blocked cell drawn with nothing but the tiles of the walkable
+   ground around it (an invisible wall at a path's edge, the grass between
+   trees) is ground: it stays flat instead of rising as a block of grass.
+   Tiles are compared by number, palette and flips; priority aside. */
+static int ground_entry(const build_ctx *c, int li, uint16_t e, int x, int y)
+{
+    const ct_scene *s = c->s;
+    const ct_scene_layer *L = layer_of(s, draw_layers[li]);
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            int nx = x + dx, ny = y + dy;
+            if ((!dx && !dy) || nx < 0 || ny < 0 || nx >= s->map_w || ny >= s->map_h ||
+                c->raised[ny][nx] || c->empty[ny][nx] ||
+                (s->cells[ny * CT_SCENE_MAX_CELLS + nx].flags & CT_CELL_OVERHEAD))
+                continue;
+            for (int q = 0; q < 4; q++)
+                if ((entry_at(L, nx, ny, q) & ~0x2000) == (e & ~0x2000))
+                    return 1;
+        }
+    return 0;
+}
+
+static void flatten_ground(build_ctx *c)
+{
+    const ct_scene *s = c->s;
+    static uint8_t flat[MAXC][MAXC];
+    memset(flat, 0, sizeof flat);
+    for (int y = 0; y < s->map_h; y++)
+        for (int x = 0; x < s->map_w; x++) {
+            if (!c->raised[y][x] || (s->cells[y * CT_SCENE_MAX_CELLS + x].flags & CT_CELL_OVERHEAD))
+                continue;
+            int ground = 1, any = 0;
+            for (int li = 0; li < 2 && ground; li++) {
+                const ct_scene_layer *L = layer_of(s, draw_layers[li]);
+                for (int q = 0; L && q < 4 && ground; q++) {
+                    uint16_t e = entry_at(L, x, y, q);
+                    if (tile_empty(s, L, e))
+                        continue;
+                    any = 1;
+                    ground = ground_entry(c, li, e, x, y);
+                }
+            }
+            flat[y][x] = ground && any;
+        }
+    for (int y = 0; y < s->map_h; y++)   /* all at once: decided on the original heights */
+        for (int x = 0; x < s->map_w; x++)
+            if (flat[y][x])
+                c->raised[y][x] = 0;
+}
+
 static void find_runs(build_ctx *c)
 {
     const ct_scene *s = c->s;
@@ -271,6 +324,7 @@ static void find_runs(build_ctx *c)
             c->solid[y][x] = cl->cls == CT_CELL_SOLID || cl->cls == CT_CELL_WALLISH;
             c->raised[y][x] = !empty && (c->solid[y][x] || (cl->flags & CT_CELL_OVERHEAD));
         }
+    flatten_ground(c);
 }
 
 static void mark_runs(build_ctx *c, int hmax)
@@ -374,6 +428,68 @@ static void emit_cell(build_ctx *c, int x, int y)
     }
 }
 
+/* port: layered cards (s3d_params.cards). Like the 3DS ports that give
+   each 2D layer its own depth instead of building models: the back layer
+   is the ground, the front layer a hair above it, and every tile the
+   console drew over sprites (canopies, roofs, arches) one flat card
+   S3D_CARD_OVER px up, moved south as far so that from the usual camera
+   it sits where the original drew it. Nothing is stood up or stretched,
+   so the art keeps its shapes; the depth shows as parallax when the
+   camera moves, and the high cards cast their shadows on the ground. */
+static void emit_card_cell(build_ctx *c, int x, int y)
+{
+    const ct_scene *s = c->s;
+    if (c->empty[y][x])
+        return;
+    for (int li = 0; li < 2; li++) {
+        const ct_scene_layer *L = layer_of(s, draw_layers[li]);
+        for (int q = 0; L && q < 4; q++) {
+            uint16_t e = entry_at(L, x, y, q);
+            if (tile_empty(s, L, e))
+                continue;
+            int over = (e & 0x2000) != 0;
+            float h = over ? S3D_CARD_OVER : li == 1 ? S3D_CARD_FRONT : 0.0f;
+            place p = {{(float)x * 16, h, (float)y * 16 + h * c->card_shift}, {1, 0, 0},
+                       {0, 0, 1}, S3D_N_UP, over ? S3D_RAISED : 0};
+            emit_quarter(c, L, e, &p, q, li, !over && li == 0 ? S3D_OPAQUE : 0);
+            if (over && li == 0) {
+                /* The ground it lifted off: the back layer's commonest tile
+                   (of this quarter) that stays down in the cells around it,
+                   the paving or grass that repeats; a one-off neighbour
+                   (another part of the same tent) showed as a ghost copy. */
+                uint16_t g = 0, cand[81];
+                int cnt[81], nc = 0, found = 0, best = 1;
+                for (int dy = -4; dy <= 4; dy++)
+                    for (int dx = -4; dx <= 4; dx++) {
+                        int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= s->map_w || ny >= s->map_h)
+                            continue;
+                        uint16_t ne = entry_at(L, nx, ny, q);
+                        if ((ne & 0x2000) || tile_empty(s, L, ne))
+                            continue;
+                        int k = 0;
+                        while (k < nc && cand[k] != ne)
+                            k++;
+                        if (k == nc) {
+                            cand[nc] = ne;
+                            cnt[nc++] = 0;
+                        }
+                        if (++cnt[k] > best) {
+                            best = cnt[k];
+                            g = ne;
+                            found = 1;
+                        }
+                    }
+                if (found) {
+                    place f;
+                    floor_place(&f, x, y);
+                    emit_quarter(c, L, g, &f, q, li, S3D_OPAQUE);
+                }
+            }
+        }
+    }
+}
+
 /* Side walls where neighboring columns' boxes differ in height. */
 static void emit_sides(build_ctx *c)
 {
@@ -385,10 +501,18 @@ static void emit_sides(build_ctx *c)
                 continue;
             int east = h1 > h2;               /* column x's east face, else x+1's west face */
             int src = east ? x : x + 1, lo = (east ? h2 : h1) / 16, hi = (east ? h1 : h2) / 16;
-            int b = box_b[z][src];
+            int b = box_b[z][src], hc = (east ? h1 : h2) / 16, a = c->run_a[b][src];
             float X = (float)(x + 1) * 16;
             for (int k = lo; k < hi; k++) {
-                int sy = b - k;   /* the wall cell at that height */
+                /* port: the box's own top, folded down over its edge: the
+                   top cell lying at this row (y = z - hc), a row further
+                   south for each step down, so the side continues the top's
+                   art instead of repeating the front wall's tiles along the
+                   whole depth of the box (streaks down canopies). Else, or
+                   off the run, the front wall's cell at that height. */
+                int sy = z - hc - (hc - 1 - k);
+                if (sy < a || sy > b - hc || c->empty[sy][src] || c->hooked[sy][src])
+                    sy = b - k;   /* the wall cell at that height */
                 if (sy < 0 || c->empty[sy][src] || c->hooked[sy][src])
                     continue;
                 place p = east ? (place){{X, (float)(k + 1) * 16, (float)(z + 1) * 16},
@@ -420,7 +544,12 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
         return 0;
     int hmax = p->hmax < 1 ? 1 : p->hmax > HMAX_CAP ? HMAX_CAP : p->hmax;
     find_runs(c);
-    mark_runs(c, hmax);
+    c->card_shift = p->card_shift > 0.0f ? p->card_shift : 1.0f;
+    if (p->cards) {
+        memset(box_h, 0, sizeof box_h);
+        memset(box_b, -1, sizeof box_b);
+    } else
+        mark_runs(c, hmax);
 
     /* Two passes over the cells: floor quads first, then raised ones, so
        the shadow pass can draw only the second range. */
@@ -429,8 +558,12 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
     c->m = &tmp;
     for (int y = 0; y < s->map_h; y++)
         for (int x = 0; x < s->map_w; x++)
-            if (!cell_hook || !cell_hook(cell_hook_user, s, x, y, &tmp))
-                emit_cell(c, x, y);
+            if (!cell_hook || !cell_hook(cell_hook_user, s, x, y, &tmp)) {
+                if (p->cards)
+                    emit_card_cell(c, x, y);
+                else
+                    emit_cell(c, x, y);
+            }
             else
                 c->hooked[y][x] = 1;
     /* tmp holds every quad in cell order: copy the floor ones, then the
@@ -455,7 +588,8 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
             m->ni_floor = m->ni;
     }
     c->m = m;
-    emit_sides(c);
+    if (!p->cards)
+        emit_sides(c);
     ctx_ok = 1;
     return oom ? -1 : m->ni / 6;
 }
@@ -481,10 +615,21 @@ static int oam_visible(const ct_scene *s, int e, int *x, int *y, int *size)
 /* One OAM entry as 8x8 quads standing upright at world z = foot_z: a
    screen row r is at height base_y + (foot_sy - r + lift) * stretch,
    foot_sy being the foot's screen row. */
+/* port: s3d_build_sprites runs twice: the entries under OAM priority 3
+   (pass 0), then those over everything (pass 1); emit_piece skips the
+   others. */
+static int spr_pass = -1;
+static int n_blobs;   /* port: contact shadows at the end of the last sprite mesh */
+int s3d_sprite_blobs(void) { return n_blobs; }
+
+static int prio3(const ct_scene *s, int e) { return ((s->oam[2 * (e & 127) + 1] >> 12) & 3) == 3; }
+
 static void emit_piece(const ct_scene *s, s3d_mesh *m, int e, float foot_z, float base_y,
                        int foot_sy, float lift, float stretch)
 {
     int x, y, size;
+    if (spr_pass >= 0 && prio3(s, e) != spr_pass)
+        return;
     if (!oam_visible(s, e, &x, &y, &size))
         return;
     uint16_t w1 = s->oam[2 * e + 1];
@@ -508,13 +653,16 @@ static void emit_piece(const ct_scene *s, s3d_mesh *m, int e, float foot_z, floa
         }
 }
 
-int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
+static int build_sprites_pass(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
 {
-    m->nv = m->ni = m->ni_floor = 0;
-    oom = 0;
     if (s->mode != CT_SCENE_FIELD || !s->oam || !s->vram)
         return 0;
     uint8_t owned[128] = {0};
+    /* port: each object's screen box and foot, for the entries no object
+       owns: one inside a box (a big character's separate arms) stands with
+       that object instead of at its own bottom, which split it apart */
+    int ob_n = 0, ob_box[CT_SCENE_MAX_OBJECTS][4], ob_foot[CT_SCENE_MAX_OBJECTS];
+    float ob_z[CT_SCENE_MAX_OBJECTS], ob_base[CT_SCENE_MAX_OBJECTS];
     for (int k = 0; k < s->n_objects && k < CT_SCENE_MAX_OBJECTS; k++) {
         const ct_scene_object *o = &s->object[k];
         if (!o->n_pieces)
@@ -529,16 +677,20 @@ int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
         }
         if (bottom == -100000)
             continue;
-        float lift = bottom > foot_sy ? (float)(bottom - foot_sy) : 0.0f;
-        lift -= (float)o->z;
-        if (lift < 0)
-            lift = 0;
+        /* port: the foot from the sprite's own entries (the same frame's
+           OAM), not the object's position: the game's copy of that can be
+           a frame apart from what the console drew, and the difference
+           made walkers bob up and down and split head from body. Only a
+           jump's height (z) lifts it off the ground. */
+        int zj = o->z > 0 && o->z < 64 ? o->z : 0;
+        foot_sy = bottom + zj;
+        float lift = 0.0f;
         /* Standing in a raised cell: the console drew it over the wall
            there if its priority beats the wall's tiles (always for
            priority 3; for less, unless they are overhead tiles). Then it
            stands in front of the wall, or on top of it, raised so its
            screen row stays where the console had it. */
-        float foot_z = (float)o->y, base_y = 0.0f;
+        float foot_z = (float)(s->camera_y + foot_sy), base_y = 0.0f;
         int cx = o->x / 16, cy = o->y / 16, prio = 0;
         for (int j = 0; j < o->n_pieces; j++) {
             int pr = (s->oam[2 * (o->piece[j] & 127) + 1] >> 12) & 3;
@@ -553,7 +705,7 @@ int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
             base_y = up;
         }
         s3d_sprite_image im;
-        if (sprite_hook && sprite_hook(sprite_hook_user, s, k, &im)) {
+        if (sprite_hook && (prio == 3) == spr_pass && sprite_hook(sprite_hook_user, s, k, &im)) {
             /* one quad for the whole picture, where its entries would be */
             float st = p->stretch, h = (float)(foot_sy - im.y) + lift;
             float tl[3] = {(float)(s->camera_x + im.x), base_y + h * st,
@@ -571,13 +723,87 @@ int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
             emit_piece(s, m, o->piece[j], foot_z, base_y, foot_sy, lift, p->stretch);
             owned[o->piece[j] & 127] = 1;
         }
+        int bx0 = 100000, by0 = 100000, bx1 = -100000;
+        for (int j = 0; j < o->n_pieces; j++) {
+            int x, y, size;
+            if (!oam_visible(s, o->piece[j], &x, &y, &size))
+                continue;
+            bx0 = x < bx0 ? x : bx0;
+            by0 = y < by0 ? y : by0;
+            bx1 = x + size > bx1 ? x + size : bx1;
+        }
+        ob_box[ob_n][0] = bx0;
+        ob_box[ob_n][1] = by0;
+        ob_box[ob_n][2] = bx1;
+        ob_box[ob_n][3] = bottom;
+        ob_foot[ob_n] = foot_sy;
+        ob_z[ob_n] = foot_z;
+        ob_base[ob_n++] = base_y;
     }
     /* The rest (effects, markers): each stands at its own bottom edge. */
     for (int e = 0; e < 128; e++) {
         int x, y, size;
         if (owned[e] || !oam_visible(s, e, &x, &y, &size))
             continue;
+        int best = -1, best_area = 0;
+        for (int k = 0; k < ob_n; k++) {
+            int ix = (x + size < ob_box[k][2] + 8 ? x + size : ob_box[k][2] + 8) -
+                     (x > ob_box[k][0] - 8 ? x : ob_box[k][0] - 8);
+            int iy = (y + size < ob_box[k][3] ? y + size : ob_box[k][3]) -
+                     (y > ob_box[k][1] - 8 ? y : ob_box[k][1] - 8);
+            if (ix > 0 && iy > 0 && ix * iy > best_area) {
+                best_area = ix * iy;
+                best = k;
+            }
+        }
+        if (best >= 0) {
+            emit_piece(s, m, e, ob_z[best], ob_base[best], ob_foot[best], 0.0f, p->stretch);
+            continue;
+        }
         emit_piece(s, m, e, (float)(s->camera_y + y + size), 0.0f, y + size, 0.0f, p->stretch);
+    }
+    return 0;
+}
+
+/* The sprites, those under OAM priority 3 first: m->ni_floor indices are
+   theirs (the renderer draws the map's overhead tiles between the two,
+   as the console's priorities do). */
+int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
+{
+    m->nv = m->ni = m->ni_floor = 0;
+    oom = 0;
+    if (s->mode != CT_SCENE_FIELD || !s->oam || !s->vram)
+        return 0;
+    for (spr_pass = 0; spr_pass < 2; spr_pass++) {
+        build_sprites_pass(s, p, m);
+        if (spr_pass == 0)
+            m->ni_floor = m->ni;
+    }
+    spr_pass = -1;
+    /* port: a soft contact shadow under each character's feet (the
+       renderer blends these in before the sprites, without depth writes),
+       so walkers sit on the ground instead of floating over it. */
+    n_blobs = 0;
+    for (int k = 0; k < s->n_objects && k < CT_SCENE_MAX_OBJECTS; k++) {
+        const ct_scene_object *o = &s->object[k];
+        int x0 = 100000, x1 = -100000, bottom = -100000;
+        for (int j = 0; j < o->n_pieces; j++) {
+            int x, y, size;
+            if (!oam_visible(s, o->piece[j], &x, &y, &size))
+                continue;
+            x0 = x < x0 ? x : x0;
+            x1 = x + size > x1 ? x + size : x1;
+            bottom = y + size > bottom ? y + size : bottom;
+        }
+        if (bottom == -100000 || x1 - x0 > 64)
+            continue;
+        int zj = o->z > 0 && o->z < 64 ? o->z : 0;
+        float w = (float)(x1 - x0) * 0.8f, d = w * 0.45f;
+        float cx = (float)(s->camera_x + (x0 + x1) / 2), cz = (float)(s->camera_y + bottom + zj);
+        float tl[3] = {cx - w * 0.5f, 0.05f, cz - d * 0.65f};
+        const float U[3] = {w / 8.0f, 0, 0}, V[3] = {0, 0, d / 8.0f};
+        s3d_emit(m, tl, U, V, S3D_OBJ | (uint32_t)S3D_N_WATER << S3D_NORMAL_SHIFT, 0, 0);
+        n_blobs++;
     }
     return oom ? -1 : m->ni / 6;
 }

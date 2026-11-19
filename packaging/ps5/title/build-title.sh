@@ -42,6 +42,16 @@ cmake --build "$objs" -j "$(nproc)" --target ct_sdl_engine >/dev/null 2>&1 || tr
 cd "$objs"
 mkdir -p "$kit/vendor/lib"
 o=$(find CMakeFiles/ct_sdl_engine.dir CMakeFiles/ct_tables_empty.dir -name '*.o')
+# The game's own hand-written C that only reads its RAM (no code made from
+# the ROM): the scene for the 3D diorama, the world map's, poses, music,
+# text boxes and rumble. Without them the diorama has nothing to build
+# (the camera settings did nothing).
+mkdir -p "$objs/game_hooks"
+for f in scene world_scene sprites audio text rumble; do
+    "$sdk/bin/prospero-clang" -std=c11 -O2 -fPIC -DCT_PS5 -I"$src/runtime" -I"$src/game/ct" \
+        -c "$src/game/ct/$f.c" -o "$objs/game_hooks/$f.o"
+    o="$o $objs/game_hooks/$f.o"
+done
 a=$(printf 'lib%s.a ' "${libs[@]:0:10}")
 "$sdk/bin/ld.lld" -r -o "$kit/vendor/ct_all.tmp.o" $o --whole-archive $a --no-whole-archive
 defs=$(readelf -sW "$kit/vendor/ct_all.tmp.o" |
