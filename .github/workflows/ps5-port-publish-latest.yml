@@ -1,0 +1,60 @@
+name: Publish latest ROM-free CT5 source and standard PS5 build
+on:
+  push:
+    branches: [ps5-upload-staging-latest-20261119]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Validate archives and publish PS5 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/ct5-latest"
+          mkdir -p "$stage"
+          cp ps5-upload-latest/ps5-port.bundle "$stage/ps5-port.bundle"
+          cp ps5-upload-latest/ct5-PPSA28360-latest.zip "$stage/ct5-PPSA28360-latest.zip"
+          cp ps5-upload-latest/SHA256SUMS.txt "$stage/SHA256SUMS.txt"
+          (cd "$stage" && sha256sum -c SHA256SUMS.txt)
+          unzip -t "$stage/ct5-PPSA28360-latest.zip" >/dev/null
+          if unzip -Z1 "$stage/ct5-PPSA28360-latest.zip" | grep -Eiq '(^|/)rom\.sfc$'; then
+            echo "Game ROM found in archive. Aborting." >&2
+            exit 1
+          fi
+          git fetch origin 6ff484423ab7df2e25266e2f282d55cf681bc1fd
+          git bundle verify "$stage/ps5-port.bundle"
+          git fetch "$stage/ps5-port.bundle" refs/heads/ps5/port:refs/heads/ct5-source-latest
+          test "$(git rev-parse ct5-source-latest)" = "c69ef4c2434c729c4d152eaf369663ba684f2c95"
+          git fetch origin refs/heads/ps5/port:refs/remotes/origin/ps5/port
+          git switch --create publish-latest --track origin/ps5/port
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git merge-base --is-ancestor ct5-source-latest HEAD; then
+            git merge --no-ff -m "Merge latest CT5 PS5 source (2026-11-19)" ct5-source-latest
+          fi
+          mkdir -p ps5-builds
+          cp "$stage/ct5-PPSA28360-latest.zip" ps5-builds/ct5-PPSA28360-latest.zip
+          sha256sum ps5-builds/ct5-PPSA28360-latest.zip | sed 's#ps5-builds/##' > ps5-builds/SHA256SUMS-standard-latest.txt
+          cat > ps5-builds/STANDARD-LATEST.md <<'DOC'
+          # CT5 standard PS5 build, November 19 2026
+          ct5-PPSA28360-latest.zip is the newest submitted ROM-free software-renderer build.
+          Supply your own legally obtained rom.sfc on your PS5. Neither the ROM
+          nor any commercial game data is included in this archive.
+          The HD-2D GPU ZIP is not updated by this publishing run.
+          The source history is published on branch ps5/port.
+          These builds were not hardware-tested by the publishing automation.
+          DOC
+          git add -f ps5-builds/ct5-PPSA28360-latest.zip ps5-builds/SHA256SUMS-standard-latest.txt ps5-builds/STANDARD-LATEST.md
+          if ! git diff --cached --quiet; then
+            git commit -m "Publish updated standard CT5 PS5 build (2026-11-19)"
+          fi
+          git push origin HEAD:refs/heads/ps5/port
+          test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/ps5/port | cut -f1)"
+          echo "PUBLISHED: https://github.com/savageforengland-hue/Triggered-Chrono-RecompHD2D/tree/ps5/port"
