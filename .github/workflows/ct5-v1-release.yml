@@ -1,0 +1,59 @@
+name: Publish CT5 1.0 PS5 homebrew release
+on:
+  push:
+    branches:
+      - release/ct5-v1-staging
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Reassemble supplied ZIP and verify SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip="$RUNNER_TEMP/CT5-1.0-PS5.zip"
+          : > "$zip"
+          for n in $(seq -w 0 23); do
+            part="release-assets/v1.0.0/CT5-1.0-PS5.zip.part$n"
+            test -s "$part"
+            cat "$part" >> "$zip"
+          done
+          test "$(stat -c %s "$zip")" = 7838359
+          printf '%s  %s\n' '709be8aaba64a2b5c4caeb27cf03000d7a4d70dc5e5fd8190d392c659ebf4b28' "$zip" | sha256sum -c -
+          unzip -tqq "$zip"
+          unzip -p "$zip" CT5-1.0/source/ct5-ps5-port.bundle > "$RUNNER_TEMP/ct5-ps5-port.bundle"
+          test -s "$RUNNER_TEMP/ct5-ps5-port.bundle"
+      - name: Import exact PS5 source and publish v1.0.0
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin 6ff484423ab7df2e25266e2f282d55cf681bc1fd
+          git bundle verify "$RUNNER_TEMP/ct5-ps5-port.bundle"
+          git fetch "$RUNNER_TEMP/ct5-ps5-port.bundle" 'refs/heads/ps5/port:refs/remotes/ct5/v1'
+          src=$(git rev-parse refs/remotes/ct5/v1)
+          test "$src" = 'f2d743cf2270305f45609905f04ddc7f95274f02'
+          git fetch --tags origin
+          if git rev-parse -q --verify refs/tags/v1.0.0 >/dev/null; then
+            existing=$(git rev-parse 'refs/tags/v1.0.0^{commit}')
+            test "$existing" = "$src" || { echo 'Conflicting v1.0.0 tag, refusing overwrite'; exit 1; }
+          else
+            git tag -a v1.0.0 "$src" -m 'CT5 1.0 PS5 homebrew release'
+            git push origin refs/tags/v1.0.0
+          fi
+          git push origin "$src:refs/heads/ps5/v1.0"
+          if gh release view v1.0.0 >/dev/null 2>&1; then
+            gh release upload v1.0.0 "$RUNNER_TEMP/CT5-1.0-PS5.zip" --clobber
+          else
+            gh release create v1.0.0 "$RUNNER_TEMP/CT5-1.0-PS5.zip" --title 'CT5 1.0 | PS5 HD-2D Homebrew' --notes-file release-assets/v1.0.0/RELEASE-NOTES.md --latest
+          fi
+          gh release view v1.0.0 --json tagName,isDraft,isPrerelease,assets --jq '{tag:.tagName,draft:.isDraft,prerelease:.isPrerelease,assets:[.assets[].name]}'
