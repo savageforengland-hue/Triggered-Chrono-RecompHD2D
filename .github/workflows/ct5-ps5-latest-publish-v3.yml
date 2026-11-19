@@ -1,0 +1,60 @@
+name: Publish latest ROM-free CT5 PS5 and HD-2D
+on:
+  push:
+    branches:
+      - ps5-upload-staging-v3-20261119
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout staging with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify latest files and publish PS5 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$RUNNER_TEMP/ct5-v3"
+          mkdir -p "$workdir"
+          cp ps5-upload-v3/ps5-port.bundle "$workdir/ps5-port.bundle"
+          cat ps5-upload-v3/ct5-hd2d-PPSA28361-latest.zip.part00 ps5-upload-v3/ct5-hd2d-PPSA28361-latest.zip.part01 ps5-upload-v3/ct5-hd2d-PPSA28361-latest.zip.part02 ps5-upload-v3/ct5-hd2d-PPSA28361-latest.zip.part03 > "$workdir/ct5-hd2d-PPSA28361-latest.zip"
+          printf '%s  %s\n' 'a8e8632ac44c47892ecdeadf383154ce1581dfb7ce740b054dba8836dd3fe0a0' "$workdir/ps5-port.bundle" | sha256sum --check
+          printf '%s  %s\n' 'c5c23860d4b4688cf562143fc2fd01816db728c376a341ba2d376ac3c0d06eeb' "$workdir/ct5-hd2d-PPSA28361-latest.zip" | sha256sum --check
+          unzip -t "$workdir/ct5-hd2d-PPSA28361-latest.zip" >/dev/null
+          if unzip -Z1 "$workdir/ct5-hd2d-PPSA28361-latest.zip" | grep -Eiq '(^|/)rom\.sfc$'; then
+            echo "ROM unexpectedly included; refusing to publish"
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main ps5/port
+          git fetch origin 6ff484423ab7df2e25266e2f282d55cf681bc1fd
+          git bundle verify "$workdir/ps5-port.bundle"
+          git fetch "$workdir/ps5-port.bundle" refs/heads/ps5/port:refs/heads/ps5-import-v3
+          test "$(git rev-parse refs/heads/ps5-import-v3)" = '941470a81b8fde41c36369a9276b71f261fa7d43'
+          git switch -c ps5-publish-v3 origin/ps5/port
+          git merge --no-ff --no-edit ps5-import-v3
+          mkdir -p ps5-builds
+          cp "$workdir/ct5-hd2d-PPSA28361-latest.zip" ps5-builds/ct5-hd2d-PPSA28361-latest.zip
+          printf '%s  %s\n' 'c5c23860d4b4688cf562143fc2fd01816db728c376a341ba2d376ac3c0d06eeb' 'ct5-hd2d-PPSA28361-latest.zip' > ps5-builds/SHA256SUMS-hd2d-latest.txt
+          cat > ps5-builds/HD2D-LATEST.md <<'EOF'
+          # Latest CT5 PS5 HD-2D homebrew build
+
+          The ROM-free `ct5-hd2d-PPSA28361-latest.zip` is the build provided on November 19, 2026.
+          SHA-256: `c5c23860d4b4688cf562143fc2fd01816db728c376a341ba2d376ac3c0d06eeb`.
+          The bundle source revision `941470a81b8fde41c36369a9276b71f261fa7d43` has been merged into this branch.
+          This build has not been tested on physical PS5 hardware as part of this upload.
+          Bring your own legally obtained ROM, which is not included.
+          EOF
+          git add -f ps5-builds/ct5-hd2d-PPSA28361-latest.zip ps5-builds/SHA256SUMS-hd2d-latest.txt ps5-builds/HD2D-LATEST.md
+          if ! git diff --cached --quiet; then
+            git commit -m "Publish latest ROM-free CT5 PS5 HD-2D build"
+          fi
+          git push origin HEAD:refs/heads/ps5/port
+          published="$(git ls-remote origin refs/heads/ps5/port | cut -f1)"
+          test "$published" = "$(git rev-parse HEAD)"
+          echo "Verified published ps5/port commit: $published"
