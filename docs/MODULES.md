@@ -114,6 +114,12 @@ reads memory, so hashes match a build without it. Both are only read while the p
 uses them. Save states from ABI 7 and 8 builds still load (`SAVESTATE_ABI_MIN`): the
 exports change nothing a state holds.
 
+Module ABI 10 adds `CT_SCENE_UI`, a scene kind with no map payload for full-screen
+menus, name entry, shops and save/load screens. It lets renderers keep those frames
+plain and sharp without also disabling the 2D effects used by battles and titles.
+The Chrono Trigger module identifies it by the menu NMI vector (`$C2840E`). This is a
+semantic scene-interface change only; save states from ABI 7 onward still load.
+
 ## Guarantees
 
 - `module_parity` (ctest, needs the ROM): the engine plus the module matches the static

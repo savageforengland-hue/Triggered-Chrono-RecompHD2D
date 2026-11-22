@@ -153,9 +153,9 @@ The `hd2d3d` preset rebuilds map views as real geometry, in the manner of the HD
 remakes: floors, walls that rise, roofs on top of them, characters standing up as
 billboards, a perspective camera tilted back from straight down, a key light with a
 shadow map, and the depth of field driven by real depth. The world map becomes a
-diorama landscape ("The world map" below). Everything else (battles, menus, mode 7,
-title and transition screens) is the `hd2d` picture, pixel for pixel, with a short
-crossfade (8 frames) between the two.
+diorama landscape ("The world map" below). Battles, the title and transitions use the
+2D HD picture; full-screen UI and mode 7 use the plain, sharp console picture. There is
+a short crossfade (8 frames) between the 2D and 3D paths.
 
 **It still draws nothing of its own.** The geometry comes from the game's map as the
 running game holds it in WRAM, and every surface is textured with the console's own
@@ -175,9 +175,10 @@ CGRAM, OAM, the OBJ size and base, brightness). A module with no scene export, o
 mode other than `CT_SCENE_FIELD` or `CT_SCENE_WORLD`, gets the 2D picture.
 
 For this game, `game/ct/scene.c` fills it from the addresses in [SCENE.md](SCENE.md). A
-frame is a map view while the field loop's NMI handler is installed (`$0500`), and the
-world map while the overworld's is (`game/ct/world_scene.c`); battles, menus and the
-title install their own. The generation counter changes when
+frame is a map view while the field loop's NMI handler is installed (`$0500`), the
+world map while the overworld's is (`game/ct/world_scene.c`), and a full-screen UI while
+the menu handler is installed; battles and the title install their own. The generation
+counter changes when
 the map grids, property bytes or metatile tables hash differently, which also catches
 tiles changed in place. The `scene_decode` test checks the description against an
 independent decoding of the same WRAM and OAM (`scene_probe.py --text`).

@@ -36,6 +36,9 @@ enum {
 /* The field loop's NMI handler (JML $C0EA63) is installed while it runs;
    battles, menus, the world map and the title install their own. */
 static const uint8_t field_nmi[4] = {0x5C, 0x63, 0xEA, 0xC0};
+/* Menu_InstallInterruptVectors: name entry, pause/save, shops and the
+   other full-screen menu views all use JML $C2840E. */
+static const uint8_t ui_nmi[4] = {0x5C, 0x0E, 0x84, 0xC2};
 
 /* BG character bases while the field runs ($210B = $11, $210C = $05). */
 enum { CHR_BG12 = 0x1000, CHR_BG3 = 0x5000 };
@@ -108,6 +111,10 @@ int ct_game_scene(ct_scene *out)
     const uint8_t *w = bus_wram();
     out->mode = CT_SCENE_OTHER;
     n_slots = 0;
+    if (!memcmp(w + NMI_VECTOR, ui_nmi, sizeof ui_nmi)) {
+        out->mode = CT_SCENE_UI;
+        return 0;
+    }
     if (memcmp(w + NMI_VECTOR, field_nmi, sizeof field_nmi))
         return ct_world_scene(out);   /* the world map, or nothing */
     unsigned mw = w[L1_W] > w[L2_W] ? w[L1_W] : w[L2_W];

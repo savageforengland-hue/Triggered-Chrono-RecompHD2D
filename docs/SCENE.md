@@ -899,8 +899,9 @@ for bit 1, `CT_CELL_COVER` for bit 2, `raw` = the nibble); `layer[0]` = BG1 and 
 `chr_base` `$2000`, `bpp` 4; `layer[2]` = the BG3 clouds (VRAM `$7800`, `chr_base` `$7000`,
 2 bpp) scrolled by `cloud_*` from `$24/$2A`; `camera` and `party` from W4; objects from OAM
 (W5: foot point = OAM screen position + (8,17) + camera); `exit` from W6;
-`cloud_blend` from `$2131`. Pixels still travel in VRAM and CGRAM. The `CT_SCENE_OTHER`
-fallback (draw the 2D picture) keeps working for every other screen.
+`cloud_blend` from `$2131`. Pixels still travel in VRAM and CGRAM. Full-screen menus use
+`CT_SCENE_UI` (NMI `$C2840E`) so renderers keep them plain and sharp; `CT_SCENE_OTHER`
+keeps the ordinary 2D-scene fallback for battles, titles and every other screen.
 
 ### W9. Feasibility: a 3D world map
 

@@ -2168,7 +2168,8 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     /* The camera: looking at the middle of the console's view, tilted
        back from straight down, far enough off to show about its width. */
     /* The world map has a camera of its own (a higher one, if the user
-       likes), centred on the player and never stopped by edges (it wraps). */
+       likes), centred on the console's view and never stopped by edges
+       (it wraps). The view can pan without the player in cutscenes. */
     int world = sc->mode == CT_SCENE_WORLD;
     float zoom = world ? g.s3.wzoom : g.s3.zoom;
     float tilt_deg = (world ? g.s3.wtilt : g.s3.tilt) + g.s3.dtilt;   /* port: + the gyro's offset */
@@ -2177,10 +2178,6 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     float aspect = (float)pw / (float)ph;   /* the picture's, at any render scale */
     float dist = 128.0f / zoom / (tanf(fovy * 0.5f) * aspect);
     float at[3] = {(float)sc->camera_x + 128.0f, 0.0f, (float)sc->camera_y + 120.0f};
-    if (world && sc->player < sc->n_objects) {
-        at[0] = (float)sc->object[sc->player].x;
-        at[2] = (float)sc->object[sc->player].y + 8.0f;
-    }
     /* The console's camera stops at the map's edges. This one sees
        further at the top of the picture (and wider there), so it stops
        sooner: the floor at the picture's edges stays on the map, give or
@@ -2524,6 +2521,18 @@ void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behi
        map view; else the 2D path; both while crossfading. Fading out with
        no scene left (a battle starting), the last 3D frame stays. */
     const ct_scene *sc = g.s3.scene;
+    /* Correctness fallback: full-screen UI and mode 7 must remain the
+       console's sharp, ungraded picture. This also prevents large bright
+       mode-7 skies from turning into a full-screen bloom source. */
+    settings plain;
+    if ((sc && sc->mode == CT_SCENE_UI) || (st && st->mode == 7)) {
+        plain = *s;
+        plain.effects = 0;
+        plain.side_dim = 0.0f;   /* black outside the 4:3 picture */
+        s = &plain;
+        scene_amt = 0.0f;
+        field_amt = 0.0f;
+    }
     int want3 = s->scene3d && g.s3.ok && sc &&
                 (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD) && sc->vram &&
                 !(st && st->mode == 7) &&
@@ -2555,10 +2564,11 @@ void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behi
     if (amt3 < 1.0f) {
         /* 2: the upscale into two planes, with the tilt: worked out in the
            passes that read the picture (bind_picture). */
-        float tilt = have_behind ? s->tilt * scene_amt * field_amt : 0.0f;
+        int world2d = sc && sc->mode == CT_SCENE_WORLD;
+        float tilt = have_behind && !world2d ? s->tilt * scene_amt * field_amt : 0.0f;
         /* Depth of field settings, shared by passes 3 and 5. */
-        float dof_tilt = s->dof_tilt * scene_amt * field_amt;
-        float dof_depth = s->dof_depth * scene_amt * field_amt;
+        float dof_tilt = world2d ? 0.0f : s->dof_tilt * scene_amt * field_amt;
+        float dof_depth = world2d ? 0.0f : s->dof_depth * scene_amt * field_amt;
         post(s, px, py, pw, ph, ow, oh, offscreen, tilt, dof_tilt, dof_depth, osd_alpha, 0, 0.0f);
     }
     if (amt3 > 0.0f) {

@@ -86,8 +86,9 @@ def exits(w):
 
 def camera(w):
     """Top-left of the 256x224 view in world px (wraps at 1536 x 1024)."""
-    px, py = u16(w, PX_X), u16(w, PX_Y)
-    return (px - 128) % (MAP_W * 16), (py - 112) % (MAP_H * 16)
+    # Usually this equals party - (128,112). During the opening flyover
+    # the view moves without the party, so the PPU shadows are authoritative.
+    return u16(w, SHADOW + 2) % (MAP_W * 16), u16(w, SHADOW + 8) % (MAP_H * 16)
 
 
 def png(path, W, H, img):

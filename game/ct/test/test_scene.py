@@ -64,6 +64,17 @@ def check(probe: str, scene: str, wram: str, vram: str, want_mode: int, tag: str
     return 0
 
 
+def check_mode(scene: str, want_mode: int, tag: str) -> int:
+    """A view with no map payload: only its generic scene kind is valid."""
+    with open(scene) as f:
+        head = f.readline().strip()
+    if head != f'mode {want_mode}':
+        print(f'test_scene: {tag}: {head}, expected mode {want_mode}')
+        return 1
+    print(f'test_scene: {tag}: {head}')
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 6:
         print(__doc__, file=sys.stderr)
@@ -74,7 +85,9 @@ def main(argv: list[str]) -> int:
     wprobe = os.path.join(os.path.dirname(probe), 'worldmap_probe.py')
     # Into the working directory (the build tree): ROM-derived files stay there.
     with tempfile.TemporaryDirectory(dir=os.getcwd()) as d:
-        bad = check(probe, *capture([static_boot], leene, 8700, d, 'leene'), 1, 'leene 8700')
+        name_scene, _, _ = capture([static_boot], leene, 1800, d, 'name_entry')
+        bad = check_mode(name_scene, 3, 'name entry 1800')
+        bad |= check(probe, *capture([static_boot], leene, 8700, d, 'leene'), 1, 'leene 8700')
         bad |= check(probe, *capture([engine_boot, '--module', module], leene, 9200, d, 'plaza'),
                      1, 'plaza 9200 (module)')
         bad |= check(probe, *capture([static_boot], gato, 10800, d, 'battle'), 0, 'battle 10800')

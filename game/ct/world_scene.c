@@ -22,7 +22,8 @@ enum {
     NMI_VECTOR = 0x0500,
     LOCATION = 0x0100,             /* $1F0-$1F7: the world maps */
     PX_X = 0x0283, PX_Y = 0x0285,  /* the party, world px (u16) */
-    BG3_HOFS = 0x0024, BG3_VOFS = 0x002A,   /* the NMI's shadow (D = 0) */
+    BG1_HOFS = 0x0020, BG1_VOFS = 0x0026,   /* the NMI's PPU shadows (D = 0) */
+    BG3_HOFS = 0x0024, BG3_VOFS = 0x002A,
     DEFS_FG = 0x3000, DEFS_BG = 0x3800,     /* 256 metatiles x 4 tilemap words */
     MAP_FG = 0x4000, MAP_BG = 0x5800,       /* 96 x 64 metatile indices */
     PROPS = 0x7000,                /* 2 bytes per ground metatile: 4 nibbles */
@@ -146,8 +147,11 @@ int ct_world_scene(ct_scene *out)
     out->map_id = map;
     out->map_generation = generation;
     int px = (int)u16at(w, PX_X), py = (int)u16at(w, PX_Y);
-    out->camera_x = ((px - 128) % (16 * MW) + 16 * MW) % (16 * MW);
-    out->camera_y = ((py - 112) % (16 * MH) + 16 * MH) % (16 * MH);
+    /* Normally the party stays at (128,112), but the opening flyover pans
+       independently. The BG1 shadows are the console's actual view; using
+       the party here made the diorama show a different part of the map. */
+    out->camera_x = (int32_t)(u16at(w, BG1_HOFS) % (16 * MW));
+    out->camera_y = (int32_t)(u16at(w, BG1_VOFS) % (16 * MH));
     out->cells = cells;
     out->wrap = 1;
 

@@ -31,8 +31,9 @@
    (CT_SCENE_WORLD and ct_scene's overlay fields); 8 is simulated rumble
    (rumble.h: the rumble_event API patches call, and the frame hook
    ct_module_info.rumble); 9 is the music and text exports
-   (ct_music_hooks, ct_text: audio packs and HD text). */
-#define CT_MODULE_ABI 9
+   (ct_music_hooks, ct_text: audio packs and HD text); 10 distinguishes
+   full-screen UI from other flat scenes so renderers never blur menus. */
+#define CT_MODULE_ABI 10
 
 /* ---- the scene: what the game is showing, for renderers (docs/SCENE.md) ----
    A module may describe its current view as a map of cells, tile layers
@@ -51,11 +52,12 @@
 #define CT_SCENE_MAX_PIECES  16
 
 enum {                       /* ct_scene.mode */
-    CT_SCENE_OTHER = 0,      /* not a map view (battle, menu, world map, title...): draw it flat */
+    CT_SCENE_OTHER = 0,      /* not a map view (battle, title...): draw it as a 2D scene */
     CT_SCENE_FIELD = 1,      /* a map view, as the cells, layers and objects describe it */
     CT_SCENE_WORLD = 2,      /* an overworld: a big map of 8 px cells, maybe wrapping, seen
                                 from above; layers 0 and 1 are its tiles, layer 2 an overlay
                                 (clouds) with its own scroll (overlay_*) */
+    CT_SCENE_UI = 3,         /* full-screen UI (menu, name entry, shop...): plain and sharp */
 };
 
 enum {                       /* ct_scene_cell.cls: what the cell is to walk on */
@@ -107,8 +109,8 @@ typedef struct {
 } ct_scene_object;
 
 typedef struct {
-    /* Filled by the module. With mode OTHER nothing else need be. */
-    uint8_t mode;            /* CT_SCENE_FIELD, CT_SCENE_WORLD or CT_SCENE_OTHER */
+    /* Filled by the module. With mode OTHER or UI nothing else need be. */
+    uint8_t mode;            /* CT_SCENE_* */
     uint8_t player;          /* index in object[] of the character the player moves, 0xFF none */
     uint8_t cell_px;         /* cell size in px (16: 2x2 tiles) */
     uint8_t n_objects;
