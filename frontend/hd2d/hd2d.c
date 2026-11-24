@@ -1862,7 +1862,8 @@ static void s3d_update(const ct_scene *sc)
 
     uint32_t eh = s3d_empty_hash(sc);
     if (!g.s3.have_map || sc->map_generation != g.s3.map_gen || eh != g.s3.empty_hash ||
-        sc->mode != g.s3.map_mode || g.model_built != g.model_gen) {
+        sc->mode != g.s3.map_mode || g.model_built != g.model_gen ||
+        (sc->mode == CT_SCENE_FIELD && !s3d_room_matches(sc))) {
         /* port: asset packs' models: their cell hook first, then (below,
            once the map's heights are known) their triangles */
         if (g.model_fn)
@@ -2170,7 +2171,7 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     /* The world map has a camera of its own (a higher one, if the user
        likes), centred on the player and never stopped by edges (it wraps). */
     int world = sc->mode == CT_SCENE_WORLD;
-    float zoom = world ? g.s3.wzoom : g.s3.zoom;
+    float zoom = world ? g.s3.wzoom : s3d_room_zoom(g.s3.zoom);
     float tilt_deg = (world ? g.s3.wtilt : g.s3.tilt) + g.s3.dtilt;   /* port: + the gyro's offset */
     tilt_deg = tilt_deg < 0 ? 0 : tilt_deg > 80 ? 80 : tilt_deg;
     float tilt = tilt_deg * 3.14159265f / 180.0f, fovy = g.s3.fov * 3.14159265f / 180.0f;

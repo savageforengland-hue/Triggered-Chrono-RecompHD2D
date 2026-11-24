@@ -234,9 +234,11 @@ Where these are wrong:
 - Sprites are flat cut-outs; one that the original split between priorities (half
   behind a roof edge) is drawn whole at its foot point.
 - The camera sees further and wider at the top of the picture than the console's, so
-  it stops sooner at the map's edges, keeping the floor at the picture's edges on the
-  map; it then doesn't follow the player all the way to an edge. A map smaller than the
-  view is centered, on a dark ground.
+  it stops sooner at the active room's edges, keeping the floor at the picture's edges
+  on the map; it then doesn't follow the player all the way to an edge. On maps that
+  store disconnected rooms together, only the walkable component(s) visible to the
+  console camera and two cells of nearby non-empty wall/roof geometry are built. A
+  small room is centered and zoomed to fit with a one-cell margin, up to 1.25x.
 
 The camera can be changed with `CT_HD2D_3D`, a comma-separated list:
 `tilt=40` (degrees from straight down), `fov=30` (vertical field of view), `zoom=0.75`
@@ -248,10 +250,11 @@ ambient occlusion's reach, in map pixels), and for the world map `wtilt=40`,
 ### Drawing
 
 1. The map's quads (one per 8x8 tile of BG2 and BG1: floor ones first) are rebuilt when
-   the generation changes, or when the set of empty tiles in VRAM does (a map whose
-   tiles were still loading). The sprites' quads are rebuilt every frame. VRAM (as a
-   16-bit texture) and CGRAM are uploaded every frame, so animated tiles and palettes
-   show as the console changes them.
+   the generation changes, when the set of empty tiles in VRAM does (a map whose tiles
+   were still loading), or when the console camera enters a disconnected room outside
+   the active-room mesh. The sprites' quads are rebuilt every frame. VRAM (as a 16-bit
+   texture) and CGRAM are uploaded every frame, so animated tiles and palettes show as
+   the console changes them.
 2. A 1024×1024 shadow map from the key light, low from the south-west, of the raised
    geometry and the sprites (cut-outs tested per pixel).
 3. The surfaces into a target with a depth buffer, at the render scale (the picture's

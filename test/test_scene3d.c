@@ -107,6 +107,62 @@ static void test_map(void)
     s3d_mesh_free(&m);
 }
 
+static void test_disconnected_rooms(void)
+{
+    enum { RW = 32, RH = 8, ROOM_W = 6, ROOM_H = 6, ROOM_B_X = 24 };
+    static ct_scene s;
+    memset(&s, 0, sizeof s);
+    memset(vram, 0, sizeof vram);
+    memset(tiles, 0, sizeof tiles);
+    memset(cells, 0, sizeof cells);
+    for (int k = 0; k < 16; k++)
+        vram[0x1000 + 16 + k] = 0x8181;
+    for (int room = 0; room < 2; room++) {
+        int rx = room ? ROOM_B_X : 1;
+        for (int y = 1; y <= ROOM_H; y++)
+            for (int x = rx; x < rx + ROOM_W; x++) {
+                for (int qy = 0; qy < 2; qy++)
+                    for (int qx = 0; qx < 2; qx++)
+                        tiles[1][(2 * y + qy) * CT_SCENE_STRIDE + 2 * x + qx] = 1;
+                cells[y * CT_SCENE_MAX_CELLS + x].cls = CT_CELL_FLOOR;
+            }
+    }
+    s.mode = CT_SCENE_FIELD;
+    s.cell_px = 16;
+    s.map_w = RW;
+    s.map_h = RH;
+    for (int l = 0; l < CT_SCENE_LAYERS; l++)
+        s.layer[l] = (ct_scene_layer){l < 2, 4, 0x1000, 0, tiles[l]};
+    s.cells = cells;
+    s.vram = vram;
+    s.cgram = cgram;
+    s.oam = oam;
+
+    s3d_mesh m = {0};
+    s3d_params p = {3, 1.0f};
+    int quads = s3d_build_map(&s, &p, &m);
+    int x0, y0, x1, y1;
+    s3d_map_bounds(&x0, &y0, &x1, &y1);
+    CHECK(quads == ROOM_W * ROOM_H * 4, "first-room quads %d", quads);
+    CHECK(x0 == 16 && y0 == 16 && x1 == 112 && y1 == 112, "first bounds %d %d %d %d",
+          x0, y0, x1, y1);
+    CHECK(s3d_room_matches(&s), "first room should still match");
+    CHECK(fabsf(s3d_room_zoom(0.75f) - 1.25f) < 0.001f, "small-room zoom %.2f",
+          s3d_room_zoom(0.75f));
+
+    s.camera_x = 128;   /* the transition gap contains no walkable cells */
+    CHECK(s3d_room_matches(&s), "void transition should retain the first room");
+    s.camera_x = 256;
+    CHECK(!s3d_room_matches(&s), "second room should request a rebuild");
+    quads = s3d_build_map(&s, &p, &m);
+    s3d_map_bounds(&x0, &y0, &x1, &y1);
+    CHECK(quads == ROOM_W * ROOM_H * 4, "second-room quads %d", quads);
+    CHECK(x0 == ROOM_B_X * 16 && y0 == 16 && x1 == (ROOM_B_X + ROOM_W) * 16 && y1 == 112,
+          "second bounds %d %d %d %d", x0, y0, x1, y1);
+    CHECK(s3d_room_matches(&s), "second room should match after rebuild");
+    s3d_mesh_free(&m);
+}
+
 static void test_sprites(void)
 {
     static ct_scene s;
@@ -262,6 +318,7 @@ static void test_world(void)
 int main(void)
 {
     test_map();
+    test_disconnected_rooms();
     test_sprites();
     test_world();
     if (fails)

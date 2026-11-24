@@ -305,9 +305,9 @@ depends on; nothing below them is worth doing while they fail.
    Add a cheap self-check: project a handful of floor tiles with the flat camera and
    compare against the console frame; a mismatch over a threshold means 2D for that
    frame. This single check kills the class of "grid of garbage tiles" bugs.
-4. **Small maps are framed.** Zoom to fit, hide map regions outside the room the
-   camera is in (the module can give a visible rectangle; the engine can also flood
-   from the player's cell across non-void cells), neutral void.
+4. **Small maps are framed.** Implemented generically by flooding from the walkable
+   cells visible to the console camera, retaining nearby wall/roof geometry, hiding
+   disconnected regions and zooming small active rooms to fit with a capped margin.
 5. **Blended overlays and translucent sprites** drawn in 3D with the console's blend,
    or 2D fallback while one is on. Darkness and fog are gameplay information.
 

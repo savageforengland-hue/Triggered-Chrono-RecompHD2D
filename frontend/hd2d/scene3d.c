@@ -143,6 +143,7 @@ typedef struct {
     uint8_t solid[MAXC][MAXC];
     uint8_t boxed[MAXC][MAXC];      /* its floor is inside a box */
     uint8_t hooked[MAXC][MAXC];     /* the cell hook drew it (or nothing) */
+    uint8_t room[MAXC][MAXC];       /* components visible to the console camera */
 } build_ctx;
 
 static build_ctx ctx;   /* the last build's, also for placing sprites */
@@ -162,6 +163,20 @@ void s3d_map_bounds(int *x0, int *z0, int *x1, int *z1)
     *z0 = bounds[1];
     *x1 = bounds[2];
     *z1 = bounds[3];
+}
+
+float s3d_room_zoom(float zoom)
+{
+    int w = bounds[2] - bounds[0], h = bounds[3] - bounds[1];
+    if (w <= 0 || h <= 0)
+        return zoom;
+    /* Leave one cell around the room. At most 1.25x avoids a dramatic
+       camera jump while making the small-room preset stop looking shrunk. */
+    float zx = 256.0f / (float)(w + 32), zy = 224.0f / (float)(h + 32);
+    float fit = zx < zy ? zx : zy;
+    if (fit > 1.25f)
+        fit = 1.25f;
+    return fit > zoom ? fit : zoom;
 }
 
 int s3d_height_at(int x, int z)
@@ -199,6 +214,101 @@ static uint32_t pack(const ct_scene_layer *L, uint16_t e, int normal, uint32_t f
     return tile_addr(L, e) | (uint32_t)((e >> 10) & 7) << S3D_PAL_SHIFT |
            (L->bpp == 2 ? S3D_2BPP : 0) | (uint32_t)normal << S3D_NORMAL_SHIFT |
            (e & 0x2000 ? S3D_OVERHEAD : 0) | flags;
+}
+
+static int div_floor16(int v)
+{
+    return v >= 0 ? v / 16 : -((-v + 15) / 16);
+}
+
+static int room_walkable(const build_ctx *c, int x, int y)
+{
+    return x >= 0 && y >= 0 && x < c->s->map_w && y < c->s->map_h && !c->empty[y][x] &&
+           !c->solid[y][x];
+}
+
+/* Flood every walkable component the console camera actually shows. Then
+   grow it by two cells through non-empty geometry, enough to retain walls,
+   furniture and roof runs without pulling a separate room across the void. */
+static void find_room(build_ctx *c)
+{
+    const ct_scene *s = c->s;
+    int qx[MAXC * MAXC], qy[MAXC * MAXC], head = 0, tail = 0;
+    int x0 = div_floor16(s->camera_x), y0 = div_floor16(s->camera_y);
+    int x1 = div_floor16(s->camera_x + 255), y1 = div_floor16(s->camera_y + 223);
+    if (x0 < 0)
+        x0 = 0;
+    if (y0 < 0)
+        y0 = 0;
+    if (x1 >= s->map_w)
+        x1 = s->map_w - 1;
+    if (y1 >= s->map_h)
+        y1 = s->map_h - 1;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+            if (room_walkable(c, x, y) && !c->room[y][x]) {
+                c->room[y][x] = 1;
+                qx[tail] = x;
+                qy[tail++] = y;
+            }
+    while (head < tail) {
+        int x = qx[head], y = qy[head++];
+        static const int dx[4] = {-1, 1, 0, 0}, dy[4] = {0, 0, -1, 1};
+        for (int k = 0; k < 4; k++) {
+            int nx = x + dx[k], ny = y + dy[k];
+            if (!room_walkable(c, nx, ny) || c->room[ny][nx])
+                continue;
+            c->room[ny][nx] = 1;
+            qx[tail] = nx;
+            qy[tail++] = ny;
+        }
+    }
+    if (!tail) {   /* An unusual map with no classified floor: preserve the old behaviour. */
+        for (int y = 0; y < s->map_h; y++)
+            for (int x = 0; x < s->map_w; x++)
+                c->room[y][x] = (uint8_t)!c->empty[y][x];
+        return;
+    }
+    for (int step = 0; step < 2; step++) {
+        uint8_t next[MAXC][MAXC];
+        memcpy(next, c->room, sizeof next);
+        for (int y = 0; y < s->map_h; y++)
+            for (int x = 0; x < s->map_w; x++) {
+                if (!c->room[y][x])
+                    continue;
+                for (int yy = y - 1; yy <= y + 1; yy++)
+                    for (int xx = x - 1; xx <= x + 1; xx++)
+                        if (xx >= 0 && yy >= 0 && xx < s->map_w && yy < s->map_h &&
+                            !c->empty[yy][xx])
+                            next[yy][xx] = 1;
+            }
+        memcpy(c->room, next, sizeof c->room);
+    }
+}
+
+int s3d_room_matches(const ct_scene *s)
+{
+    if (!ctx_ok || ctx.s != s || s->mode != CT_SCENE_FIELD)
+        return 0;
+    int x0 = div_floor16(s->camera_x), y0 = div_floor16(s->camera_y);
+    int x1 = div_floor16(s->camera_x + 255), y1 = div_floor16(s->camera_y + 223);
+    if (x0 < 0)
+        x0 = 0;
+    if (y0 < 0)
+        y0 = 0;
+    if (x1 >= s->map_w)
+        x1 = s->map_w - 1;
+    if (y1 >= s->map_h)
+        y1 = s->map_h - 1;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+            if (room_walkable(&ctx, x, y)) {
+                if (!ctx.room[y][x])
+                    return 0;
+            }
+    /* During a transition the console camera can briefly show only void.
+       Keep the last room until a walkable cell of the next one appears. */
+    return 1;
 }
 
 /* The layers drawn as geometry, back to front: BG2, then BG1. (The third
@@ -247,8 +357,6 @@ static void raised_place(const build_ctx *c, place *p, int x, int y)
 static void find_runs(build_ctx *c)
 {
     const ct_scene *s = c->s;
-    bounds[0] = bounds[1] = 1 << 20;
-    bounds[2] = bounds[3] = 0;
     memset(c->run_a, -1, sizeof c->run_a);
     memset(c->run_b, -1, sizeof c->run_b);
     memset(c->run_h, -1, sizeof c->run_h);
@@ -262,15 +370,24 @@ static void find_runs(build_ctx *c)
                     empty = tile_empty(s, L, entry_at(L, x, y, q));
             }
             c->empty[y][x] = (uint8_t)empty;
-            if (!empty) {
-                bounds[0] = x * 16 < bounds[0] ? x * 16 : bounds[0];
-                bounds[1] = y * 16 < bounds[1] ? y * 16 : bounds[1];
-                bounds[2] = x * 16 + 16 > bounds[2] ? x * 16 + 16 : bounds[2];
-                bounds[3] = y * 16 + 16 > bounds[3] ? y * 16 + 16 : bounds[3];
-            }
             c->solid[y][x] = cl->cls == CT_CELL_SOLID || cl->cls == CT_CELL_WALLISH;
             c->raised[y][x] = !empty && (c->solid[y][x] || (cl->flags & CT_CELL_OVERHEAD));
         }
+    find_room(c);
+    bounds[0] = bounds[1] = 1 << 20;
+    bounds[2] = bounds[3] = 0;
+    for (int y = 0; y < s->map_h; y++)
+        for (int x = 0; x < s->map_w; x++)
+            if (c->room[y][x] && !c->empty[y][x]) {
+                if (x * 16 < bounds[0])
+                    bounds[0] = x * 16;
+                if (y * 16 < bounds[1])
+                    bounds[1] = y * 16;
+                if (x * 16 + 16 > bounds[2])
+                    bounds[2] = x * 16 + 16;
+                if (y * 16 + 16 > bounds[3])
+                    bounds[3] = y * 16 + 16;
+            }
 }
 
 static void mark_runs(build_ctx *c, int hmax)
@@ -319,7 +436,7 @@ static void mark_runs(build_ctx *c, int hmax)
 static void emit_cell(build_ctx *c, int x, int y)
 {
     const ct_scene *s = c->s;
-    if (c->empty[y][x])
+    if (c->empty[y][x] || !c->room[y][x])
         return;
     int in_run = c->run_b[y][x] >= 0, solid = c->solid[y][x];
     place fl, up;
@@ -349,13 +466,14 @@ static void emit_cell(build_ctx *c, int x, int y)
     int src = -1, sx = x;
     for (int k = 0; k < 2 && src < 0; k++) {
         int r = k == 0 ? c->run_a[y][x] - 1 : c->run_b[y][x] + 1;
-        if (r >= 0 && r < s->map_h && !c->raised[r][x] && !c->empty[r][x])
+        if (r >= 0 && r < s->map_h && c->room[r][x] && !c->raised[r][x] && !c->empty[r][x])
             src = r;
     }
     /* Else the cell beside it, west or east (a post between two others). */
     for (int k = 0; k < 2 && src < 0; k++) {
         int nx = k == 0 ? x - 1 : x + 1;
-        if (nx >= 0 && nx < s->map_w && !c->raised[y][nx] && !c->empty[y][nx]) {
+        if (nx >= 0 && nx < s->map_w && c->room[y][nx] && !c->raised[y][nx] &&
+            !c->empty[y][nx]) {
             src = y;
             sx = nx;
         }
@@ -421,6 +539,14 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
     int hmax = p->hmax < 1 ? 1 : p->hmax > HMAX_CAP ? HMAX_CAP : p->hmax;
     find_runs(c);
     mark_runs(c, hmax);
+    /* Hidden rooms must not affect side-wall heights at the active room's
+       boundary. The visible neighbor remains, so its closing face is made. */
+    for (int y = 0; y < s->map_h; y++)
+        for (int x = 0; x < s->map_w; x++)
+            if (!c->room[y][x]) {
+                box_h[y][x] = 0;
+                box_b[y][x] = -1;
+            }
 
     /* Two passes over the cells: floor quads first, then raised ones, so
        the shadow pass can draw only the second range. */
@@ -429,7 +555,9 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
     c->m = &tmp;
     for (int y = 0; y < s->map_h; y++)
         for (int x = 0; x < s->map_w; x++)
-            if (!cell_hook || !cell_hook(cell_hook_user, s, x, y, &tmp))
+            if (!c->room[y][x])
+                continue;
+            else if (!cell_hook || !cell_hook(cell_hook_user, s, x, y, &tmp))
                 emit_cell(c, x, y);
             else
                 c->hooked[y][x] = 1;
