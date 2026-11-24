@@ -69,8 +69,8 @@ PACK_PICTURE_RE = re.compile(r'(^|[/!\\])((tiles|sprites|objects)[/\\][0-9a-f]{1
                              r'|poses[/\\][0-9a-f]{8}|sheet_[a-z0-9_]+_\d+x)\.png$', re.I)
 # Audio packs' sound ([[music]]): in a music/ or packs/ folder (any depth below).
 PACK_AUDIO_DIR_RE = re.compile(r'(^|[/!\\])(music|packs)[/\\]', re.I)
-PACK_AUDIO_EXT_RE = re.compile(r'\.(ogg|oga|opus|flac|wav|mp3)$', re.I)
-PACK_AUDIO_MAGIC = (b'OggS', b'fLaC')
+PACK_AUDIO_EXT_RE = re.compile(r'\.(ogg|oga|opus|flac|wav|mp3|pcm)$', re.I)
+PACK_AUDIO_MAGIC = (b'OggS', b'fLaC', b'MSU1')
 
 
 # Byte tables that are part of no game's data but turn up in many programs

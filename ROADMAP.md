@@ -65,7 +65,7 @@ milestone. MSU-1 comes first.
 ## Audio
 | Feature | Where | Issue |
 |---|---|---|
-| MSU-1 soundtrack support (first) | both | #51, #52 |
+| MSU-1 soundtrack files: implemented PCM decoding and pack importer; hardware validation and patch-specific event compatibility pending ([details](docs/MSU1.md)) | both | #51, #52 |
 | Best-in-class audio: hardware-exact DSP by default, plus the options below | engine | #49, #50 |
 | Separate music and SFX volume: mixer (engine), voice mapping (game) | both | #49, #73 |
 | Interpolation options: Gaussian, cubic, sinc | engine | #49 |

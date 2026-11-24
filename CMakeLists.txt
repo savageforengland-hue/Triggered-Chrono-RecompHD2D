@@ -450,6 +450,7 @@ add_executable(test_music test/test_music.c)
 target_link_libraries(test_music ct_packs ct_runtime)
 target_compile_options(test_music PRIVATE ${CT_WARN})
 add_test(NAME music COMMAND test_music ${CMAKE_BINARY_DIR}/test_music_tmp)
+add_test(NAME import_msu1 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_import_msu1.py)
 add_test(NAME music_codecs COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_music_codecs.py
     $<TARGET_FILE:test_music> ${CMAKE_BINARY_DIR}/test_music_codecs_tmp)
 set_tests_properties(music_codecs PROPERTIES SKIP_RETURN_CODE 77)

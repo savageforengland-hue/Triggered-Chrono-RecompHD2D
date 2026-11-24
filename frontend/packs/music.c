@@ -2,6 +2,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * port: audio packs (music.h). */
+#ifndef _WIN32
+#define _FILE_OFFSET_BITS 64
+#endif
 #include "music.h"
 
 #include <math.h>
@@ -24,13 +27,15 @@
 
 /* ---- decoders: one stream of 16-bit stereo frames, whatever the file ---- */
 
-enum { DEC_NONE, DEC_VORBIS, DEC_FLAC, DEC_WAV };
+enum { DEC_NONE, DEC_VORBIS, DEC_FLAC, DEC_WAV, DEC_MSU1 };
 
 typedef struct {
     int kind;
     stb_vorbis *vorbis;
     drflac *flac;
     drwav wav;
+    FILE *pcm;
+    uint32_t loop_start;
     int channels, rate;
     uint64_t frames;   /* 0: unknown */
 } decoder;
@@ -41,10 +46,49 @@ static int has_ext(const char *path, const char *ext)
     return n > e && !strcasecmp(path + n - e, ext);
 }
 
+#ifdef _WIN32
+#define pcm_seek _fseeki64
+#define pcm_tell _ftelli64
+#else
+#define pcm_seek fseeko
+#define pcm_tell ftello
+#endif
+
+static uint32_t read_le32(const unsigned char *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
 static int dec_open(decoder *d, const char *path, char *err, size_t errlen)
 {
     memset(d, 0, sizeof *d);
-    if (has_ext(path, ".ogg") || has_ext(path, ".oga")) {
+    if (has_ext(path, ".pcm")) {
+        unsigned char header[8];
+        d->pcm = fopen(path, "rb");
+        if (!d->pcm) {
+            snprintf(err, errlen, "cannot open MSU-1 PCM");
+            return -1;
+        }
+        d->kind = DEC_MSU1;
+        if (fread(header, 1, sizeof header, d->pcm) != sizeof header ||
+            memcmp(header, "MSU1", 4) || pcm_seek(d->pcm, 0, SEEK_END)) {
+            snprintf(err, errlen, "invalid MSU-1 header");
+            return -1;
+        }
+        int64_t bytes = pcm_tell(d->pcm);
+        if (bytes < 12 || (bytes - 8) % 4 || pcm_seek(d->pcm, 8, SEEK_SET)) {
+            snprintf(err, errlen, "empty or truncated MSU-1 stereo data");
+            return -1;
+        }
+        d->frames = (uint64_t)(bytes - 8) / 4;
+        d->loop_start = read_le32(header + 4);
+        if (d->loop_start >= d->frames) {
+            snprintf(err, errlen, "MSU-1 loop point outside audio data");
+            return -1;
+        }
+        d->channels = 2;
+        d->rate = 44100;
+    } else if (has_ext(path, ".ogg") || has_ext(path, ".oga")) {
         int e = 0;
         d->vorbis = stb_vorbis_open_filename(path, &e, NULL);
         if (!d->vorbis) {
@@ -76,7 +120,7 @@ static int dec_open(decoder *d, const char *path, char *err, size_t errlen)
         d->rate = (int)d->wav.sampleRate;
         d->frames = d->wav.totalPCMFrameCount;
     } else {
-        snprintf(err, errlen, "not .ogg, .flac or .wav");
+        snprintf(err, errlen, "not .ogg, .flac, .wav or MSU-1 .pcm");
         return -1;
     }
     if (d->channels < 1 || d->rate < 4000 || d->rate > 384000) {
@@ -94,6 +138,8 @@ static void dec_close(decoder *d)
         drflac_close(d->flac);
     else if (d->kind == DEC_WAV)
         drwav_uninit(&d->wav);
+    else if (d->kind == DEC_MSU1)
+        fclose(d->pcm);
     d->kind = DEC_NONE;
 }
 
@@ -118,6 +164,14 @@ static int dec_read(decoder *d, int16_t *out, int n)
             return 0;
         got = (int)drwav_read_pcm_frames_s16(&d->wav, (drwav_uint64)n, tmp);
     }
+    if (d->kind == DEC_MSU1) {
+        unsigned char raw[1024 * 4];
+        got = (int)fread(raw, 4, (size_t)n, d->pcm);
+        for (int k = 0; k < got * 2; k++) {
+            unsigned v = (unsigned)raw[2 * k] | (unsigned)raw[2 * k + 1] << 8;
+            tmp[k] = (int16_t)(v >= 32768 ? (int)v - 65536 : (int)v);
+        }
+    }
     for (int k = 0; k < got; k++) {
         out[2 * k] = tmp[k * ch];
         out[2 * k + 1] = tmp[k * ch + (ch > 1)];
@@ -127,6 +181,8 @@ static int dec_read(decoder *d, int16_t *out, int n)
 
 static int dec_seek(decoder *d, uint64_t frame)
 {
+    if (d->kind == DEC_MSU1)
+        return frame < d->frames && !pcm_seek(d->pcm, 8 + (int64_t)frame * 4, SEEK_SET) ? 0 : -1;
     if (d->kind == DEC_VORBIS)
         return stb_vorbis_seek(d->vorbis, (unsigned)frame) ? 0 : -1;
     if (d->kind == DEC_FLAC)
@@ -199,6 +255,7 @@ static void load_one(const char *dir)
             memset(&e, 0, sizeof e);
             e.song = -1;
             e.loop = 1;
+            e.loop_start = -1;
             e.loop_end = -1;
             e.volume = 1.0;
             e.follow_fades = 1;
@@ -236,6 +293,7 @@ typedef struct {
     const entry *e;
     decoder d;
     resampler rs;
+    uint64_t loop_start; /* manifest override, otherwise decoder metadata */
     uint64_t pos;        /* the file's next frame */
     int ended;           /* the file is over (no loop) */
     double ramp;         /* 0-1: the declick envelope */
@@ -264,6 +322,13 @@ static int voice_open(voice *v, const entry *e)
         dec_close(&v->d);
         return -1;
     }
+    v->loop_start = e->loop_start >= 0 ? (uint64_t)e->loop_start : v->d.loop_start;
+    uint64_t end = e->loop_end >= 0 ? (uint64_t)e->loop_end : v->d.frames;
+    if (e->loop && end && (v->loop_start >= end || (v->d.frames && end > v->d.frames))) {
+        fprintf(stderr, "music: %s: invalid loop range\n", e->file);
+        dec_close(&v->d);
+        return -1;
+    }
     v->e = e;
     rs_init(&v->rs, v->d.rate, out_rate);
     v->ramp = 0.0;
@@ -281,7 +346,10 @@ static void voice_fade_out(voice *v)
 static int voice_render(voice *v, int16_t *out, int n)
 {
     int done = 0;
-    for (int guard = 0; done < n && guard < 64; guard++) {
+    /* A valid PCM loop can contain just one frame. Bound work by the
+       source frames needed, rather than starving after 64 tiny loops. */
+    uint64_t budget = 576 + (uint64_t)n * (unsigned)v->d.rate / (unsigned)out_rate;
+    for (uint64_t guard = 0; done < n && guard < budget; guard++) {
         int got = rs_process(&v->rs, NULL, 0, out + 2 * done, n - done);
         done += got > 0 ? got : 0;
         if (done >= n || v->ended)
@@ -298,9 +366,9 @@ static int voice_render(voice *v, int16_t *out, int n)
             done += got > 0 ? got : 0;
         }
         if (m < want || (end && v->pos >= end) || m == 0) {   /* at the loop's end */
-            if (v->e->loop && v->pos > (uint64_t)v->e->loop_start &&
-                !dec_seek(&v->d, (uint64_t)v->e->loop_start))
-                v->pos = (uint64_t)v->e->loop_start;
+            if (v->e->loop && v->pos > v->loop_start &&
+                !dec_seek(&v->d, v->loop_start))
+                v->pos = v->loop_start;
             else
                 v->ended = 1;
         }

@@ -475,6 +475,9 @@ dialect of `hires.txt`, so `pack.toml` is the definition here.
 
 ## Music: audio packs
 
+Standard MSU-1 `.pcm` recordings are supported directly, including header loop
+points. See [MSU1.md](MSU1.md) for the existing-pack importer and compatibility limits.
+
 A pack's `pack.toml` can map the game's songs to sound files of your own. While a
 mapped song plays, the console's music is muted and your file plays instead, looped
 and faded as the game asks. Sound effects stay the console's.
@@ -496,8 +499,8 @@ game's music, in any form, is for your personal use only.
    ```
 
    `ct_boot --music-log` prints the same headless (with `--script` and a replay).
-2. **Put the files in a pack.** Ogg Vorbis (`.ogg`), FLAC (`.flac`) or WAV (`.wav`),
-   any sample rate, mono or stereo (more channels: the first two are played):
+2. **Put the files in a pack.** Ogg Vorbis (`.ogg`), FLAC (`.flac`), WAV (`.wav`), or MSU-1 PCM (`.pcm`),
+   any supported sample rate, mono or stereo (MSU-1 PCM is fixed at 44.1 kHz stereo):
 
    ```
    ~/.local/share/ct-recomp/ct/packs/mymusic/
