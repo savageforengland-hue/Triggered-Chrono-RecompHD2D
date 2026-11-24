@@ -308,8 +308,9 @@ depends on; nothing below them is worth doing while they fail.
 4. **Small maps are framed.** Zoom to fit, hide map regions outside the room the
    camera is in (the module can give a visible rectangle; the engine can also flood
    from the player's cell across non-void cells), neutral void.
-5. **Blended overlays and translucent sprites** drawn in 3D with the console's blend,
-   or 2D fallback while one is on. Darkness and fog are gameplay information.
+5. **Blended overlays and translucent sprites.** Implemented with a per-frame 2D
+   fallback whenever the console's layer buffer says any visible pixel used color math.
+   Darkness and fog remain part of the original console frame.
 
 **P1: the diorama**
 

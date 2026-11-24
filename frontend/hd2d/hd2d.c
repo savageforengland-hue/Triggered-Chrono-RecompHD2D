@@ -2430,6 +2430,20 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     return 0;
 }
 
+/* The 3D scene does not reproduce SNES color math (the layer byte's bit 3
+   marks each pixel that actually used it). Keep every affected frame on the
+   2D path so fog, darkness masks, translucent sprites and similar overlays
+   remain exactly as the console drew them. */
+static int s3d_has_color_math(const uint8_t *layers)
+{
+    if (!layers)
+        return 0;
+    for (int k = 0; k < SCHED_WIDTH * SCHED_HEIGHT; k++)
+        if (layers[k] & 8)
+            return 1;
+    return 0;
+}
+
 void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behind,
                  const uint8_t *behind_layers, const sched_ppu_state *st, int ow, int oh,
                  int offscreen)
@@ -2524,6 +2538,8 @@ void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behi
        map view; else the 2D path; both while crossfading. Fading out with
        no scene left (a battle starting), the last 3D frame stays. */
     const ct_scene *sc = g.s3.scene;
+    int math_fallback = sc && (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD) &&
+                        s3d_has_color_math(layers);
     int want3 = s->scene3d && g.s3.ok && sc &&
                 (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD) && sc->vram &&
                 !(st && st->mode == 7) &&
@@ -2531,8 +2547,8 @@ void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behi
                    console shows something else over a loaded map (a
                    black screen with text), so the 3D view would show a
                    map nobody sees */
-                !(st && !((st->main_enabled | st->sub_enabled) & 3));
-    if (!s->scene3d || (!want3 && (g.s3.pic_w != pw || g.s3.pic_h != ph)))
+                !(st && !((st->main_enabled | st->sub_enabled) & 3)) && !math_fallback;
+    if (math_fallback || !s->scene3d || (!want3 && (g.s3.pic_w != pw || g.s3.pic_h != ph)))
         g.s3.amt = 0.0f;
     else
         g.s3.amt = want3 ? fminf(g.s3.amt + S3D_FADE_STEP, 1.0f)

@@ -508,6 +508,39 @@ static void emit_piece(const ct_scene *s, s3d_mesh *m, int e, float foot_z, floa
         }
 }
 
+/* A few animations are drawn lying on a bed or another broad surface. A
+   deliberately wider-than-tall pose is a useful game-agnostic signal; put
+   its OAM tiles on the map plane instead of turning the whole picture into
+   an upright billboard. */
+static int pose_lies_flat(int obj, ct_scene_pose *pose)
+{
+    return !ct_scene_pose_of(obj, pose, NULL, 0) && pose->w >= pose->h + 8;
+}
+
+static void emit_piece_flat(const ct_scene *s, s3d_mesh *m, int e, float surface_y)
+{
+    int x, y, size;
+    if (!oam_visible(s, e, &x, &y, &size))
+        return;
+    uint16_t w1 = s->oam[2 * e + 1];
+    int hf = (w1 >> 14) & 1, vf = (w1 >> 15) & 1, n = size / 8;
+    uint32_t base = s->obj_chr[(w1 >> 8) & 1], pal = (w1 >> 9) & 7;
+    const float U[3] = {1, 0, 0}, V[3] = {0, 0, 1};
+    float push = (float)(127 - e) * 0.004f;
+    for (int ty = 0; ty < n; ty++)
+        for (int tx = 0; tx < n; tx++) {
+            int col = (hf ? n - 1 - tx : tx) * 8, row = (vf ? n - 1 - ty : ty) * 8;
+            int used = ((((w1 & 0xFF) >> 4) + (row >> 3)) << 4) | (((w1 & 0xF) + (col >> 3)) & 0xF);
+            uint32_t addr = (base + (uint32_t)used * 16) & S3D_ADDR_MASK;
+            float tl[3] = {(float)(s->camera_x + x + tx * 8), surface_y,
+                           (float)(s->camera_y + y + ty * 8) + push};
+            s3d_emit(m, tl, U, V,
+                     addr | pal << S3D_PAL_SHIFT | S3D_OBJ |
+                         (uint32_t)S3D_N_SPRITE << S3D_NORMAL_SHIFT | S3D_RAISED,
+                     hf, vf);
+        }
+}
+
 int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
 {
     m->nv = m->ni = m->ni_floor = 0;
@@ -519,6 +552,8 @@ int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
         const ct_scene_object *o = &s->object[k];
         if (!o->n_pieces)
             continue;
+        ct_scene_pose pose;
+        int lies_flat = pose_lies_flat(k, &pose);
         int foot_sy = (int)(o->y - s->camera_y);
         /* The sprite's lowest row stands on the floor, never under it. */
         int bottom = -100000;
@@ -556,9 +591,18 @@ int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
         if (sprite_hook && sprite_hook(sprite_hook_user, s, k, &im)) {
             /* one quad for the whole picture, where its entries would be */
             float st = p->stretch, h = (float)(foot_sy - im.y) + lift;
-            float tl[3] = {(float)(s->camera_x + im.x), base_y + h * st,
-                           foot_z + (float)(127 - o->piece[0]) * 0.004f};
-            const float U[3] = {(float)im.w / 8.0f, 0, 0}, V[3] = {0, -st * (float)im.h / 8.0f, 0};
+            float tl[3] = {(float)(s->camera_x + im.x), base_y,
+                           (float)(s->camera_y + im.y) +
+                               (float)(127 - o->piece[0]) * 0.004f};
+            const float U[3] = {(float)im.w / 8.0f, 0, 0};
+            float V[3] = {0, 0, 0};
+            if (lies_flat)
+                V[2] = (float)im.h / 8.0f;
+            else {
+                V[1] = -st * (float)im.h / 8.0f;
+                tl[1] = base_y + h * st;
+                tl[2] = foot_z + (float)(127 - o->piece[0]) * 0.004f;
+            }
             s3d_emit(m, tl, U, V,
                      (im.tile & (S3D_PACKED | S3D_ENTRY_MASK)) | S3D_OBJ |
                          (uint32_t)S3D_N_SPRITE << S3D_NORMAL_SHIFT | S3D_RAISED,
@@ -568,7 +612,10 @@ int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
             continue;
         }
         for (int j = 0; j < o->n_pieces; j++) {
-            emit_piece(s, m, o->piece[j], foot_z, base_y, foot_sy, lift, p->stretch);
+            if (lies_flat)
+                emit_piece_flat(s, m, o->piece[j], base_y);
+            else
+                emit_piece(s, m, o->piece[j], foot_z, base_y, foot_sy, lift, p->stretch);
             owned[o->piece[j] & 127] = 1;
         }
     }

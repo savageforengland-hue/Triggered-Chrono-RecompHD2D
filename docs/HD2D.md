@@ -222,8 +222,10 @@ Where these are wrong:
 - Shaped cells (wall-ish: corners, diagonals) count as blocked, so diagonal walls are
   stepped.
 - BG3 (in map views mostly fog, light shafts and other color-math overlays) and color
-  math in general aren't drawn in 3D; the UI from BG3's top level is laid flat over the
-  picture as in the 2D path. Translucent or tinted sprites are opaque.
+  math in general aren't drawn in 3D; if any visible pixel uses SNES color math, that
+  frame stays on the 2D path so fog, darkness masks and translucent sprites keep their
+  console blend. Otherwise, the UI from BG3's top level is laid flat over the picture
+  as in the 2D path. Translucent or tinted sprites are opaque in frames without math.
 - What the console draws into its BG1 tilemap only (a text box's window) isn't in the
   scene, which is the map as the game keeps it. Each frame, per 8x8 tile of BG1 on the
   screen, the console's BG1 pixels are compared with the scene's tile decoded from VRAM
@@ -233,6 +235,9 @@ Where these are wrong:
   where most tiles differ.
 - Sprites are flat cut-outs; one that the original split between priorities (half
   behind a roof edge) is drawn whole at its foot point.
+- Clearly horizontal poses (at least one 8 px tile wider than tall) lie on the map
+  plane at their supporting surface instead of standing up as a billboard. This lets
+  sleeping or prone characters rest on beds and other broad raised geometry.
 - The camera sees further and wider at the top of the picture than the console's, so
   it stops sooner at the map's edges, keeping the floor at the picture's edges on the
   map; it then doesn't follow the player all the way to an edge. A map smaller than the
