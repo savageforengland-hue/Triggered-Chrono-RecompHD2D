@@ -69,6 +69,12 @@ typedef struct {
 
 #define S3D_CARD_FRONT 3    /* the front layer over the back one, px */
 #define S3D_CARD_OVER  16   /* tiles drawn over sprites (canopies, roofs), px */
+/* Camera basis and target size, used to snap field sprites to output pixels. */
+typedef struct {
+    float eye[3], at[3], right[3], up[3], fwd[3];
+    float focal, near;
+    int w, h;
+} s3d_view;
 
 void s3d_mesh_free(s3d_mesh *m);
 
@@ -79,12 +85,16 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m);
 
 /* This frame's sprites: one quad per 8x8 piece of every visible OAM entry,
    standing at its object's foot point (entries no object owns stand at
-   their own bottom edge). Returns the number of quads. */
+   their own bottom edge). With a view, upright sprites are snapped to its
+   target-pixel grid and use an integer pixel scale. Returns the number of
+   quads. */
 int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m);
 /* port: how many quads at the end of that mesh are contact shadows (flat
    under each character's feet, S3D_OBJ | S3D_N_WATER; the shader draws
    them as a soft dark ellipse, to be blended by multiplying). */
 int s3d_sprite_blobs(void);
+int s3d_build_sprites_view(const ct_scene *s, const s3d_params *p, const s3d_view *v,
+                           s3d_mesh *m);
 
 /* One textured quad: corner tl, then a step of 8 px along u (the tile's
    +x) and along v (its +y, downward in the image); tile is the packed
@@ -116,9 +126,44 @@ typedef struct {
 typedef int (*s3d_sprite_hook)(void *user, const ct_scene *s, int obj, s3d_sprite_image *out);
 void s3d_set_sprite_hook(s3d_sprite_hook fn, void *user);
 
-/* The part of the map with pixels (map px), from the last s3d_build_map:
-   the renderer keeps its camera from showing much beyond it. */
+/* Bounds of the active room in the last field mesh, in map pixels. A field
+   map can hold several disconnected rooms; only the components visible in
+   the console camera are built, plus their nearby walls. */
 void s3d_map_bounds(int *x0, int *z0, int *x1, int *z1);
+
+/* Rebuild when the console camera enters a different cell, including when
+   it leaves a room that was previously visible alongside another one. */
+int s3d_room_matches(const ct_scene *s);
+
+/* Conservative fallback for visible actors standing on blocked furniture. */
+int s3d_field_needs_2d(const ct_scene *s);
+
+/* Focus follows console scroll; player coordinates do not override cutscenes. */
+void s3d_camera_target(const ct_scene *s, float at[3]);
+
+/* Scripted shots use only their authored camera. Live camera offsets
+   (currently gyro) are suppressed until control returns to the player. */
+void s3d_camera_offsets(const ct_scene *s, float user_tilt, float user_yaw,
+                        float *tilt, float *yaw);
+
+/* Some cutscene engines use presentation ct_scene cannot describe (Mode 7,
+   per-line HDMA, mixed modes). Those frames must use the console composite. */
+int s3d_scene_exact_2d(const ct_scene *s);
+
+/* Cutscene/scene focus transition. A hard scene cut also restarts the
+   existing 2D -> 3D crossfade; smaller authored changes only restart the
+   12-frame aperture ease. */
+enum { S3D_FOCUS_CUT = 1 << 0, S3D_SCENE_CUT = 1 << 1 };
+typedef struct {
+    uint32_t map_id, map_generation;
+    int32_t camera_x, camera_y;
+    uint8_t valid, mode, scripted, frame;
+} s3d_focus_state;
+float s3d_focus_step(s3d_focus_state *state, const ct_scene *s, int valid3d, int *change);
+
+/* Raise a user's field-camera zoom only enough to frame a small active room,
+   with a margin and a conservative cap. Large maps keep the requested zoom. */
+float s3d_room_zoom(float zoom);
 
 /* For tests and the renderer: the inferred height (px) of the top of the
    raised geometry over cell (x, z) of the world grid (16 px cells), from
@@ -142,15 +187,9 @@ float s3d_world_height(float x, float z);
    wrapping; rgb = normal * 0.5 + 0.5, a = 255. */
 const uint8_t *s3d_world_normals(int *w, int *h);
 
-/* The camera, for sprites that keep the console's pixel grid: eye, the
-   point it looks at, unit right / up / forward, focal length in target
-   px, the near plane's distance, the target size. */
-typedef struct {
-    float eye[3], at[3], right[3], up[3], fwd[3];
-    float focal, near;
-    int w, h;
-} s3d_view;
-
+/* The camera basis used to project and snap field sprites: eye, point of
+   focus, unit right / up / forward, focal length in target px, near plane,
+   and target size. */
 /* This frame's world sprites, as billboards facing the camera: each
    object's pieces stand at its foot point on the ground, and are snapped
    so that one sprite pixel is a whole number of target pixels, on the

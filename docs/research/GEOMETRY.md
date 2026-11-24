@@ -375,7 +375,7 @@ Order is risk first (P0 correctness), then the geometry that removes the paper l
    Test: `scene_decode`-style check on the survey's expected facade row counts;
    golden shot of a house.
 8. **`ct_scene_height` ABI + `hints_build.py` + `game/ct/scene.c` loader** (1.3).
-   Files: `runtime/module.h` (ABI 10), `game/ct/scene.c`, `game/ct/hints/*`,
+   Files: `runtime/module.h` (ABI 11), `game/ct/scene.c`, `game/ct/hints/*`,
    `game/ct/tools/hints_build.py`, `frontend/hd2d/scene3d.c`, `tools/check_agnostic.py`
    run. Test: `hints_build.py --lint` in ctest; unit test that a one-cell `top` override
    changes exactly that cell's vertices; ABI mismatch is refused.

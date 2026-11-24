@@ -154,8 +154,9 @@ remakes: floors, walls that rise, roofs on top of them, characters standing up a
 billboards, a perspective camera tilted back from straight down, a key light with a
 shadow map, and the depth of field driven by real depth. The world map becomes a
 diorama landscape ("The world map" below). Everything else (battles, menus, mode 7,
-title and transition screens) is the `hd2d` picture, pixel for pixel, with a short
-crossfade (8 frames) between the two.
+title and transition screens) is the `hd2d` picture, pixel for pixel. A verified map
+eases into 3D over 8 frames; an inconclusive or mismatched scene switches directly to
+2D so an old or incorrect map is never shown during fallback.
 
 **It still draws nothing of its own.** The geometry comes from the game's map as the
 running game holds it in WRAM, and every surface is textured with the console's own
@@ -173,6 +174,11 @@ the player's object, the camera in map pixels, a map generation counter and a mo
 (map view or other). The engine adds the console's state (`ct_scene_capture`: VRAM,
 CGRAM, OAM, the OBJ size and base, brightness). A module with no scene export, or a
 mode other than `CT_SCENE_FIELD` or `CT_SCENE_WORLD`, gets the 2D picture.
+
+Before drawing a 3D map, the renderer samples a 6x6 grid of visible BG1/BG2 pixels and
+decodes the corresponding scene tiles from the module's map, VRAM and CGRAM. It uses 3D
+only when at least six samples can be compared and no more than a quarter differ. The
+check is shared by all modules; an inconclusive result safely selects 2D.
 
 For this game, `game/ct/scene.c` fills it from the addresses in [SCENE.md](SCENE.md). A
 frame is a map view while the field loop's NMI handler is installed (`$0500`), and the
@@ -205,10 +211,12 @@ from the cells (all of them generic: a cell's class and its tiles' priority bits
 5. Floor a wall leaves uncovered behind it is filled with the ground of the cell north
    of its run.
 6. Sprites are billboards: each visible OAM entry, standing at its object's foot point
-   on the floor, made taller by `cos(tilt) / sin(tilt)` (at most 1.4) so it keeps its
-   drawn proportions under the tilt. An object standing in a raised cell whose priority
-   puts it over that cell's tiles in the original (priority 3, or tiles that aren't
-   overhead) stands in front of the wall, or on top of it, at the same screen row.
+   on the floor, with its projected corners snapped to whole target pixels and an
+   integer target-pixel scale. The normal height stretch is `cos(tilt) / sin(tilt)` (at
+   most 1.4) so it keeps its drawn proportions under the tilt. An object standing in
+   a raised cell whose priority puts it over that cell's tiles in the original
+   (priority 3, or tiles that aren't overhead) stands in front of the wall, or on top
+   of it, at the same screen row.
    Entries no object owns (effects, markers) stand at their own bottom edge.
 
 Where these are wrong:
@@ -240,7 +248,8 @@ Where these are wrong:
 
 The camera can be changed with `CT_HD2D_3D`, a comma-separated list:
 `tilt=40` (degrees from straight down), `fov=30` (vertical field of view), `zoom=0.75`
-(1: the console's 256 px across at the focus), `hmax=3` (wall cap in cells),
+(1: the console's 256 px across at the focus; field zoom rounds to an integer pixel
+density at the current render width), `hmax=3` (wall cap in cells),
 `stretch=1.2` (billboard height scale; default from the tilt) and `aoradius=12` (the
 ambient occlusion's reach, in map pixels), and for the world map `wtilt=40`,
 `wzoom=0.75` and `marks=1` (entrance marks).
@@ -423,7 +432,7 @@ UI does.
 
 **Camera.** The field's tilt and zoom by default; `worldmap_tilt` and `worldmap_zoom` (the
 Look tab, settings.ini; `CT_HD2D_3D=wtilt=..,wzoom=..`) give the world map its own, e.g.
-a higher one (tilt 25, zoom 60%). It looks at the party, a little north of its feet, and
+a higher one (tilt 25, zoom 60%). It follows the console camera, including scripted flyovers, and
 never stops at an edge. BG3 isn't UI on the world map (it is the clouds), so the UI layer
 is off there.
 
@@ -590,3 +599,33 @@ the renderer lays the box's tiles flat over the scene (below), and the text over
   tilt-shift only.
 - The renderer works under OpenGL ES 3.0 for Android, but that hasn't been tested on a
   device.
+
+### Room and composition safeguards (Q3-Q5)
+
+Field meshes keep walkable components visible in the console viewport and two
+neighboring cells of non-empty walls/furniture. Bounds and zoom use this selection;
+the mesh is refreshed when the camera moves to another 16-pixel cell, so a room
+that leaves the viewport does not remain cached. With no classified floor, only
+non-empty cells inside the console viewport are retained.
+
+A visible actor whose foot occupies a blocked cell selects the plain 2D preset for
+that frame. Beds and other furniture need surface and pose metadata before they can
+be reconstructed safely in 3D. Preserving the whole console composite also retains
+the blanket's occlusion. This intentionally includes other actors on blocked cells;
+it is a conservative fallback, not a full 3D sleeping-pose implementation.
+
+The world camera uses the console camera position, with the existing focus offset,
+so scripted flyovers can pan independently of the player. Synthetic tests cover
+these decisions; the reported ROM scenes still require visual verification.
+
+Module ABI 11 identifies scripted shots and scenes that require the exact console
+composite. Scripted field/world shots still use HD-2D when the scene gate matches,
+but live camera offsets are suppressed. Scene cuts crossfade back over eight frames
+and the depth-of-field aperture eases in over 12; smooth authored pans do not reset
+it. The special cutscene engine remains 2D across its mixed Mode 1/Mode 7/HDMA
+segments. See [CUTSCENES.md](CUTSCENES.md).
+
+Native PS5 integration preserves full-screen UI and Mode 7 without scene effects.
+Frames using console color math use the original composition rather than an
+unblended 3D reconstruction. The generic scene gate alone cannot validate blended
+pixels. See [PS5-INTEGRATION.md](PS5-INTEGRATION.md) for test scope and limitations.

@@ -32,6 +32,7 @@ int ct_scene_available(void) { return scene_fn != NULL; }
 int ct_scene_capture(ct_scene *out)
 {
     out->mode = CT_SCENE_OTHER;
+    out->flags = 0;
     if (!scene_fn)
         return -1;
     /* The console's side first, as the PPU holds it now (OBSEL, INIDISP),
@@ -49,6 +50,7 @@ int ct_scene_capture(ct_scene *out)
     out->brightness = p->forcedBlank ? 0 : p->brightness;
     if (scene_fn(out)) {
         out->mode = CT_SCENE_OTHER;
+        out->flags = 0;
         return -1;
     }
     return 0;

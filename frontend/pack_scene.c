@@ -308,7 +308,8 @@ void pack_scene_frame(const ct_scene *sc)
     P.ncur = 0;
     if (!sc || !pack_scene_wants_poses())
         return;
-    if (where_on > 0 && sc->mode != CT_SCENE_OTHER && sc->player < sc->n_objects) {
+    int map = sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD;
+    if (where_on > 0 && map && sc->player < sc->n_objects) {
         static unsigned t;   /* for placing models: once a second */
         const ct_scene_object *o = &sc->object[sc->player];
         int cp = sc->cell_px ? sc->cell_px : 16;
@@ -316,7 +317,7 @@ void pack_scene_frame(const ct_scene *sc)
             fprintf(stderr, "pack_scene: map 0x%03x, player at %d,%d px: cell %d,%d\n", sc->map_id,
                     o->x, o->y, o->x / cp, o->y / cp);
     }
-    if (export_on && sc->mode != CT_SCENE_OTHER)
+    if (export_on && map)
         export_map(sc);
     if (sc->mode != CT_SCENE_FIELD)
         return;

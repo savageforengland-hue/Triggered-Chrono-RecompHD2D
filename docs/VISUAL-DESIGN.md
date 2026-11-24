@@ -206,10 +206,10 @@ Numbers are for a 1080-line picture; scale lengths by `picture height / 1080`.
 
 - Fades: the 3D picture follows the console's brightness every frame; a fade to
   black reaches black on the same frame as the console.
-- 3D to 2D and back (battle start, menu, map change): an 8-frame crossfade between two
-  *valid* pictures. Neither side of the crossfade may be a frame of a map that is not
-  the one on screen: no flash of the previous map, no grid of garbage tiles, no
-  half-loaded tilemap, no frame of void.
+- Entering a verified 3D map eases in over 8 frames. A missing, inconclusive or
+  mismatched scene switches straight to 2D; the renderer never fades out a stale 3D
+  frame. No transition may show the wrong map, a grid of garbage tiles, a half-loaded
+  tilemap or a frame of void.
 - **The scene gate.** A 3D frame is drawn only when the scene is consistent with what
   the console is showing: the map's tiles are loaded, the camera is inside the map, at
   least one layer the console has enabled is in the scene, and the screen is not
@@ -302,9 +302,9 @@ depends on; nothing below them is worth doing while they fail.
    opaque BG with glyph-like tiles) gets no DOF, bloom or vignette. Name entry is
    blurred today.
 3. **The scene gate** (see Transitions): no 3D frame from a map that isn't on screen.
-   Add a cheap self-check: project a handful of floor tiles with the flat camera and
-   compare against the console frame; a mismatch over a threshold means 2D for that
-   frame. This single check kills the class of "grid of garbage tiles" bugs.
+   Implemented as a 6x6 sample of visible BG1/BG2 pixels checked against the module's
+   tilemap, VRAM and CGRAM at the console camera coordinates. Fewer than six comparable
+   samples or more than 25% color mismatches sends the frame directly to 2D.
 4. **Small maps are framed.** Zoom to fit, hide map regions outside the room the
    camera is in (the module can give a visible rectangle; the engine can also flood
    from the player's cell across non-void cells), neutral void.
@@ -313,8 +313,9 @@ depends on; nothing below them is worth doing while they fail.
 
 **P1: the diorama**
 
-6. **Snap field billboards and choose an integer zoom** (rule 3). This is the
-   loudest amateur tell and is already solved on the world map; port it.
+6. **Snap field billboards and choose an integer zoom** (rule 3). Implemented: the
+   field camera snaps its focus-row pixel density to an integer at the current render
+   width, and upright billboards use integer target-pixel scales with snapped corners.
 7. **Light by time and place.** Derive the key light's strength and color from the
    scene (the 2D path's darkness measure; the palette's mean hue): strong warm sun
    outdoors, weak cool fill indoors with lamps and windows doing the work, as the

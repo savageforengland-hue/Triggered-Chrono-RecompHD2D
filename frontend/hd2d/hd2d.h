@@ -193,7 +193,9 @@ void hd2d_set_camera_offset(float dtilt, float dyaw);
 /* port: the 3D diorama's camera (the menu, settings.ini cam_tilt /
    cam_zoom): tilt in degrees from looking straight down (0-80, default
    40), zoom (0.25-4, default 0.75; 1: the console's 256 pixels across at
-   the point it looks at). The offset above (gyro) adds to the tilt.
+   the point it looks at). Field rendering snaps the effective zoom to an
+   integer source-pixel density at the current render width. The offset above
+   (gyro) adds to the tilt.
    CT_HD2D_3D=tilt=..,zoom=.. in the environment still wins at start-up. */
 void hd2d_set_camera(float tilt, float zoom);
 void hd2d_camera(float *tilt, float *zoom);

@@ -56,6 +56,7 @@ milestone. MSU-1 comes first.
 | Feature | Where | Issue |
 |---|---|---|
 | Widescreen toggle with per-scene 4:3 fallback: wide-frame PPU rendering (engine); tile loading, sprite culling, cutscene and battle fixes (game). Order: Mode 7 and field maps, then battles, then cutscenes | both | #66, #67 |
+| HD-2D cutscene context: scripted camera lock, exact-console fallback and focus/crossfade transitions (first stage done); dedicated Mode 7 reconstruction and hardware acceptance pending | both | #67, #68 |
 | HD Mode 7 | engine | #68 |
 | HD sprite and tile packs | engine | #69 |
 | High refresh rate interpolation (120/144 Hz): framework (engine), camera and object positions (game) | both | #70, #71 |
@@ -65,7 +66,7 @@ milestone. MSU-1 comes first.
 ## Audio
 | Feature | Where | Issue |
 |---|---|---|
-| MSU-1 soundtrack support (first) | both | #51, #52 |
+| MSU-1 soundtrack files: implemented PCM decoding and pack importer; hardware validation and patch-specific event compatibility pending ([details](docs/MSU1.md)) | both | #51, #52 |
 | Best-in-class audio: hardware-exact DSP by default, plus the options below | engine | #49, #50 |
 | Separate music and SFX volume: mixer (engine), voice mapping (game) | both | #49, #73 |
 | Interpolation options: Gaussian, cubic, sinc | engine | #49 |

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * port: audio packs: the [[music]] entries of asset packs, which play the
- * player's own recordings (Ogg Vorbis, FLAC or WAV) in place of the
+ * player's own recordings (Ogg Vorbis, FLAC, WAV or MSU-1 PCM) in place of the
  * game's songs (docs/ASSET-PACKS.md). The game module says when a song
  * starts, fades or stops (module.h ct_music_event, by the game's song
  * ids); this streams the file mapped to that song, loops it, follows the
@@ -14,9 +14,9 @@
  *
  *   [[music]]
  *   song = 0x18                 # the game's song id (--music-log prints them)
- *   file = "music/fair.ogg"     # .ogg, .flac or .wav, relative to the pack
+ *   file = "music/fair.ogg"     # .ogg, .flac, .wav or .pcm, relative to the pack
  *   loop = true                 # play it again from loop_start at its end (default)
- *   loop_start = 441000         # in the file's samples (sample frames), default 0
+ *   loop_start = 441000         # in the file's samples (sample frames), default: PCM header or 0
  *   loop_end = 5292000          # default: the end of the file
  *   volume = 0.8                # 0-4, default 1
  *   fade = "game"               # "game": follow the game's fades (default); "none"

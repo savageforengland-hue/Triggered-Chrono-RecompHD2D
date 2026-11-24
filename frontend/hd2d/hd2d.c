@@ -587,6 +587,7 @@ static struct {
         GLuint t_box;
         float wtilt, wzoom;
         int marks;
+        s3d_focus_state focus;   /* cutscene cuts and the 12-frame focus pull */
     } s3;
     /* port: asset packs: the atlas (array texture), its entries (two
        RGBA16UI texels each, 1024 entries a row), the per-pixel map. */
@@ -1505,7 +1506,7 @@ static void light_pass(const settings *s, int ui_z, float scene_amt)
    pass is mixed over what is already there by that much (crossfade). */
 static void post(const settings *s, int px, int py, int pw, int ph, int ow, int oh, int offscreen,
                  float tilt, float dof_tilt, float dof_depth, float osd_alpha, int threeD,
-                 float blend)
+                 float blend, float aperture)
 {
     int pc = threeD ? P3_COC : P_COC, pb = threeD ? P3_BRIGHT : P_BRIGHT,
         pf = threeD ? P3_FINAL : P_FINAL;
@@ -1529,7 +1530,7 @@ static void post(const settings *s, int px, int py, int pw, int ph, int ow, int 
         p_glUniform1i(U(P_DOFBLUR, "uFg"), 1);
         p_glUniform4f(U(P_DOFBLUR, "uFocus"), g.focus_y, s->focus_band, s->focus_ramp, 0.5f);
         p_glUniform3f(U(P_DOFBLUR, "uDof"), dof_tilt, dof_depth, fore_depth);
-        float radius = s->dof_radius * (float)ph / 1080.0f * 2.0f;
+        float radius = s->dof_radius * (float)ph / 1080.0f * 2.0f * aperture;
         p_glUniform1f(U(P_DOFBLUR, "uRadius"), radius);
         bind_tex(0, g.half[0].tex);
         bind_tex(1, g.fgh[0].tex);
@@ -1964,21 +1965,6 @@ static void m4_ortho(float *m, float r_, float t, float n, float f)
     memcpy(m, r, sizeof r);
 }
 
-/* port: the map layers' character tiles, all of their words (for the
-   settle after a battle: the same pictures as when the map was left). */
-static uint32_t s3d_chr_hash(const ct_scene *sc)
-{
-    uint32_t h = 2166136261u;
-    for (int l = 0; l < 2; l++) {
-        const ct_scene_layer *L = &sc->layer[l];
-        if (!L->present)
-            continue;
-        for (uint32_t k = 0; k < 1024u * (L->bpp == 2 ? 8u : 16u); k++)
-            h = (h ^ sc->vram[(L->chr_base + k) & 0x7FFF]) * 16777619u;
-    }
-    return h;
-}
-
 /* Which BG character tiles are empty: a mesh built while the map's tiles
    were still loading is rebuilt once they are in. */
 static uint32_t s3d_empty_hash(const ct_scene *sc)
@@ -2041,7 +2027,8 @@ static void s3d_update(const ct_scene *sc)
     uint32_t eh = s3d_empty_hash(sc);
     if (!g.s3.have_map || sc->map_generation != g.s3.map_gen || eh != g.s3.empty_hash ||
         sc->mode != g.s3.map_mode || g.model_built != g.model_gen || g.s3.map_cards != user_cards ||
-        g.s3.map_tilt != g.s3.tilt) {
+        g.s3.map_tilt != g.s3.tilt ||
+        (sc->mode == CT_SCENE_FIELD && !s3d_room_matches(sc))) {
         /* port: asset packs' models: their cell hook first, then (below,
            once the map's heights are known) their triangles */
         if (g.model_fn)
@@ -2095,13 +2082,6 @@ static void s3d_update(const ct_scene *sc)
                 best = cnt[k] > cnt[best] ? k : best;
             g.s3.cloud_pal = cnt[best] ? best : -1;
         }
-    } else {
-        s3d_build_sprites(sc, &p, &g.s3.spr);
-        p_glBindVertexArray(g.s3.vao[1]);
-        s3d_upload(g.s3.vbo[1], g.s3.ebo[1], &g.s3.spr, GL_STREAM_DRAW);
-        g.s3.blob_ni = s3d_sprite_blobs() * 6;
-        g.s3.spr_ni = g.s3.spr.ni - g.s3.blob_ni;   /* the blobs after: drawn on their own */
-        g.s3.spr_ni_low = g.s3.spr.ni_floor;
     }
     /* port: asset packs: which of the map's tiles have replacements */
     g.pack3d_on = g.pack_entries > 0 && g.pack_lookup != NULL;
@@ -2284,22 +2264,25 @@ static void s3d_box_mask(const ct_scene *sc, const uint8_t *bgrx, const uint8_t 
                          int ui_z)
 {
     static uint8_t mask[SCHED_WIDTH * SCHED_HEIGHT];
+    static uint8_t changed[SCHED_WIDTH * SCHED_HEIGHT];
     static int was_set;
     memset(mask, 0, sizeof mask);
+    memset(changed, 0, sizeof changed);
     int any = 0;
     uint8_t mk[29][33];   /* marked tiles, from the camera's top-left one */
     memset(mk, 0, sizeof mk);
     const ct_scene_layer *L = &sc->layer[0];
-    /* (No UI text on screen: no box to find, so skip the per-pixel scan.) */
-    if (ui_z >= 0 && sc->mode == CT_SCENE_FIELD && L->present && L->tiles && sc->vram &&
-        sc->cgram && sc->brightness >= 4) {
+    if (sc->mode == CT_SCENE_FIELD && L->present && L->tiles && sc->vram && sc->cgram &&
+        sc->brightness >= 4) {
         uint8_t lev[32];
         for (int c = 0; c < 32; c++) {
             int v = c * sc->brightness / 15;
             lev[c] = (uint8_t)(v << 3 | v >> 2);
         }
         int tw = 2 * sc->map_w, th = 2 * sc->map_h, cx = sc->camera_x, cy = sc->camera_y;
-        for (int ty = cy >> 3; ty * 8 - cy < SCHED_HEIGHT; ty++)
+        for (int ty = cy >> 3; ty * 8 - cy < SCHED_HEIGHT; ty++) {
+            if (ui_z < 0 && ty * 8 - cy + 7 < SCHED_HEIGHT / 2)
+                continue;   /* the opening bar can only be a dialogue window near the bottom */
             for (int tx = cx >> 3; tx * 8 - cx < SCHED_WIDTH; tx++) {
                 uint16_t e = tx >= 0 && ty >= 0 && tx < tw && ty < th
                                  ? L->tiles[ty * CT_SCENE_STRIDE + tx] : 0;
@@ -2322,18 +2305,23 @@ static void s3d_box_mask(const ct_scene *sc, const uint8_t *bgrx, const uint8_t 
                         seen++;
                         if (!ci) {
                             diff++;
+                            changed[k] = 1;
                             continue;
                         }
                         uint16_t c = sc->cgram[(L->pal_base + ((e >> 10) & 7) * 16 + ci) & 255];
                         const uint8_t *p = &bgrx[k * 4];
-                        diff += abs(p[2] - lev[c & 31]) > 8 || abs(p[1] - lev[c >> 5 & 31]) > 8 ||
-                                abs(p[0] - lev[c >> 10 & 31]) > 8;
+                        int different = abs(p[2] - lev[c & 31]) > 8 ||
+                                        abs(p[1] - lev[c >> 5 & 31]) > 8 ||
+                                        abs(p[0] - lev[c >> 10 & 31]) > 8;
+                        diff += different;
+                        changed[k] = (uint8_t)different;
                     }
                 }
                 if (diff < 6 || diff * 2 < seen)
                     continue;
                 mk[ty - (cy >> 3)][tx - (cx >> 3)] = 1;
             }
+        }
         /* A box is a band of tiles across the screen with the UI's text
            in it: runs of at least 16 marked tiles in a row, within 10
            tile rows of a row with UI pixels (scattered marks are tiles
@@ -2369,6 +2357,29 @@ static void s3d_box_mask(const ct_scene *sc, const uint8_t *bgrx, const uint8_t 
                 c0 = c1 > c0 ? c1 : c0 + 1;
             }
         }
+
+        /* Before the first glyph is drawn, the dialogue window opens as a
+           thin horizontal band. It has no text row to anchor the normal
+           box detector, so preserve a broad, line-like BG1 difference at
+           the bottom of the picture pixel-for-pixel. */
+        if (ui_z < 0) {
+            const int run_w = 96, min_changed = 64;
+            for (int y = SCHED_HEIGHT / 2; y < SCHED_HEIGHT; y++)
+                for (int x0 = 0; x0 + run_w <= SCHED_WIDTH; x0 += 8) {
+                    int n = 0;
+                    for (int x = x0; x < x0 + run_w; x++)
+                        n += changed[y * SCHED_WIDTH + x] != 0;
+                    if (n < min_changed)
+                        continue;
+                    for (int x = x0; x < x0 + run_w; x++) {
+                        int k = y * SCHED_WIDTH + x;
+                        if (changed[k]) {
+                            mask[k] = 1;
+                            any = 1;
+                        }
+                    }
+                }
+        }
     }
     if (any || was_set) {
         bind_tex(0, g.s3.t_box);
@@ -2376,6 +2387,21 @@ static void s3d_box_mask(const ct_scene *sc, const uint8_t *bgrx, const uint8_t 
                           GL_UNSIGNED_BYTE, mask);
     }
     was_set = any;
+}
+
+/* The focus row's map pixels should occupy a whole number of target
+   pixels. zoom is expressed as source-pixel scale at the focus, so this
+   snaps it to the nearest integer density at the current render width. */
+static float s3d_integer_zoom(float zoom, int render_width)
+{
+    if (render_width <= 0)
+        return zoom;
+    float pixels = floorf((float)render_width * zoom / 256.0f + 0.5f);
+    float max_pixels = floorf((float)render_width * 4.0f / 256.0f);
+    if (max_pixels < 1.0f)
+        max_pixels = 1.0f;
+    pixels = pixels < 1.0f ? 1.0f : pixels > max_pixels ? max_pixels : pixels;
+    return pixels * 256.0f / (float)render_width;
 }
 
 static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int ui_z,
@@ -2420,10 +2446,12 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     /* The camera: looking at the middle of the console's view, tilted
        back from straight down, far enough off to show about its width. */
     /* The world map has a camera of its own (a higher one, if the user
-       likes), centred on the player and never stopped by edges (it wraps). */
+       likes), centred on the console camera, including scripted pans (it wraps). */
     int world = sc->mode == CT_SCENE_WORLD;
-    float zoom = world ? g.s3.wzoom : g.s3.zoom;
-    float tilt_deg = (world ? g.s3.wtilt : g.s3.tilt) + g.s3.dtilt;   /* port: + the gyro's offset */
+    float zoom = world ? g.s3.wzoom : s3d_integer_zoom(s3d_room_zoom(g.s3.zoom), rw);
+    float live_tilt, live_yaw;
+    s3d_camera_offsets(sc, g.s3.dtilt, g.s3.dyaw, &live_tilt, &live_yaw);
+    float tilt_deg = (world ? g.s3.wtilt : g.s3.tilt) + live_tilt;
     tilt_deg = tilt_deg < 0 ? 0 : tilt_deg > 80 ? 80 : tilt_deg;
     /* port: the field's layered cards with a long lens (14 degrees, from
        further off: the same view): with the wide one, cards and sprites
@@ -2433,11 +2461,8 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     float tilt = tilt_deg * 3.14159265f / 180.0f, fovy = fov_deg * 3.14159265f / 180.0f;
     float aspect = (float)pw / (float)ph;   /* the picture's, at any render scale */
     float dist = 128.0f / zoom / (tanf(fovy * 0.5f) * aspect);
-    float at[3] = {(float)sc->camera_x + 128.0f, 0.0f, (float)sc->camera_y + 120.0f};
-    if (world && sc->player < sc->n_objects) {
-        at[0] = (float)sc->object[sc->player].x;
-        at[2] = (float)sc->object[sc->player].y + 8.0f;
-    }
+    float at[3];
+    s3d_camera_target(sc, at);
     /* The console's camera stops at the map's edges. This one sees
        further at the top of the picture (and wider there), so it stops
        sooner: the floor at the picture's edges stays on the map, give or
@@ -2465,8 +2490,8 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     }
     float eye[3] = {at[0], at[1] + dist * cosf(tilt), at[2] + dist * sinf(tilt)};
     float up[3] = {0.0f, sinf(tilt), -cosf(tilt)};
-    if (g.s3.dyaw != 0.0f) {   /* port: the gyro's turn, about the vertical through at */
-        float yaw = g.s3.dyaw * 3.14159265f / 180.0f, sy = sinf(yaw), cy = cosf(yaw);
+    if (live_yaw != 0.0f) {   /* port: the gyro's turn, about the vertical through at */
+        float yaw = live_yaw * 3.14159265f / 180.0f, sy = sinf(yaw), cy = cosf(yaw);
         float h = dist * sinf(tilt);
         eye[0] = at[0] + h * sy;
         eye[2] = at[2] + h * cy;
@@ -2480,6 +2505,33 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     if (world) {
         s3d_world_view(sc, eye, at, up, fovy, dist, rw, rh);   /* snapped to the render target */
     } else {
+        s3d_view sv = {.focal = 0.5f * (float)rh / tanf(fovy * 0.5f), .near = dist * 0.15f,
+                       .w = rw, .h = rh};
+        s3d_params sp = {g.s3.hmax, 1.0f, user_cards, tanf(tilt)};
+        float st = tilt_deg > 0.1f ? cosf(tilt) / sinf(tilt) : 1.4f;
+        sp.stretch = g.s3.stretch > 0.0f ? g.s3.stretch
+                    : st < 1.0f               ? 1.0f
+                    : st > 1.4f               ? 1.4f
+                                               : st;
+        for (int k = 0; k < 3; k++) {
+            sv.eye[k] = eye[k];
+            sv.at[k] = at[k];
+            sv.fwd[k] = at[k] - eye[k];
+        }
+        v3_norm(sv.fwd);
+        sv.right[0] = sv.fwd[1] * up[2] - sv.fwd[2] * up[1];
+        sv.right[1] = sv.fwd[2] * up[0] - sv.fwd[0] * up[2];
+        sv.right[2] = sv.fwd[0] * up[1] - sv.fwd[1] * up[0];
+        v3_norm(sv.right);
+        sv.up[0] = sv.right[1] * sv.fwd[2] - sv.right[2] * sv.fwd[1];
+        sv.up[1] = sv.right[2] * sv.fwd[0] - sv.right[0] * sv.fwd[2];
+        sv.up[2] = sv.right[0] * sv.fwd[1] - sv.right[1] * sv.fwd[0];
+        s3d_build_sprites_view(sc, &sp, &sv, &g.s3.spr);
+        p_glBindVertexArray(g.s3.vao[1]);
+        s3d_upload(g.s3.vbo[1], g.s3.ebo[1], &g.s3.spr, GL_STREAM_DRAW);
+        g.s3.blob_ni = s3d_sprite_blobs() * 6;
+        g.s3.spr_ni = g.s3.spr.ni - g.s3.blob_ni;
+        g.s3.spr_ni_low = g.s3.spr.ni_floor;
         n_copies = 1;
         copies[0][0] = copies[0][1] = 0.0f;
         cloud_ni = 0;
@@ -2714,6 +2766,96 @@ static int s3d_render(const ct_scene *sc, const settings *s, int pw, int ph, int
     return 0;
 }
 
+/* Read one opaque BG pixel from the tilemap the scene module supplied.
+   Field maps store two 8 px tiles per cell; world maps already use 8 px
+   cells. Both use the same fixed 256-tile row stride. */
+static int s3d_scene_pixel(const ct_scene *sc, int layer, int x, int y, uint8_t rgb[3])
+{
+    if (!sc || layer < 0 || layer > 1 || !sc->vram || !sc->cgram || !sc->brightness ||
+        !sc->layer[layer].present || !sc->layer[layer].tiles)
+        return 0;
+    int tw = sc->mode == CT_SCENE_WORLD ? sc->map_w : 2 * sc->map_w;
+    int th = sc->mode == CT_SCENE_WORLD ? sc->map_h : 2 * sc->map_h;
+    int mapw = tw * 8, maph = th * 8;
+    int mx = sc->camera_x + x, my = sc->camera_y + y;
+    if (sc->wrap && mapw > 0 && maph > 0) {
+        mx = (mx % mapw + mapw) % mapw;
+        my = (my % maph + maph) % maph;
+    } else if (mx < 0 || my < 0 || mx >= mapw || my >= maph) {
+        return -1;
+    }
+    const ct_scene_layer *L = &sc->layer[layer];
+    if (L->bpp != 2 && L->bpp != 4)
+        return 0;
+    int tx = mx >> 3, ty = my >> 3, u = mx & 7, v = my & 7;
+    uint16_t e = L->tiles[(size_t)ty * CT_SCENE_STRIDE + tx];
+    int row = e & 0x8000 ? 7 - v : v;
+    int sh = e & 0x4000 ? u : 7 - u;
+    uint32_t a = (L->chr_base + (e & 0x3FFu) * (L->bpp == 2 ? 8u : 16u)) & 0x7FFFu;
+    unsigned ci = 0;
+    for (int plane = 0; plane < L->bpp; plane++) {
+        uint16_t bits = sc->vram[(a + (unsigned)(plane / 2) * 8u + (unsigned)row) & 0x7FFFu];
+        ci |= (unsigned)((bits >> (sh + (plane & 1) * 8)) & 1u) << plane;
+    }
+    if (!ci)   /* color zero is transparent on BG1/BG2 */
+        return 0;
+    unsigned pal_size = 1u << L->bpp;
+    uint16_t c = sc->cgram[(L->pal_base + ((e >> 10) & 7u) * pal_size + ci) & 255u];
+    unsigned r = (c & 31u) * sc->brightness / 15u;
+    unsigned g = (c >> 5 & 31u) * sc->brightness / 15u;
+    unsigned b = (c >> 10 & 31u) * sc->brightness / 15u;
+    rgb[0] = (uint8_t)((b << 3) | (b >> 2));
+    rgb[1] = (uint8_t)((g << 3) | (g >> 2));
+    rgb[2] = (uint8_t)((r << 3) | (r >> 2));
+    return 1;
+}
+
+/* Cheap, game-independent scene gate. A regular grid of the console's
+   winning BG1/BG2 pixels must agree with the same tile coordinates in the
+   module's map description. If the map is stale, shifted, blanked or only
+   partially loaded, the caller keeps the frame on the 2D path. */
+static int s3d_scene_matches_console(const ct_scene *sc, const uint8_t *bgrx,
+                                    const uint8_t *layers, const sched_ppu_state *st, int ui_z)
+{
+    if (!sc || !bgrx || !layers || !sc->vram || !sc->cgram || !sc->brightness ||
+        (sc->mode != CT_SCENE_FIELD && sc->mode != CT_SCENE_WORLD) || (st && st->mode == 7))
+        return 0;
+    static const int sx[] = {16, 60, 104, 148, 192, 236};
+    static const int sy[] = {16, 54, 92, 130, 168, 206};
+    int compared = 0, different = 0;
+    for (size_t yi = 0; yi < sizeof sy / sizeof sy[0]; yi++)
+        for (size_t xi = 0; xi < sizeof sx / sizeof sx[0]; xi++) {
+            int x = sx[xi], y = sy[yi], k = y * SCHED_WIDTH + x;
+            uint8_t tag = layers[k], layer = tag & 7u;
+            if (layer > 1 || (ui_z >= 0 && (tag >> 4) == ui_z) || (tag & 8u))
+                continue;
+            if (st && !(st->main_enabled & (1u << layer)))
+                continue;
+            uint8_t expected[3];
+            int got = s3d_scene_pixel(sc, layer, x, y, expected);
+            if (!got)
+                continue;
+            compared++;
+            if (got < 0 || abs((int)bgrx[k * 4 + 0] - expected[0]) > 12 ||
+                abs((int)bgrx[k * 4 + 1] - expected[1]) > 12 ||
+                abs((int)bgrx[k * 4 + 2] - expected[2]) > 12)
+                different++;
+        }
+    /* Too few comparable map pixels is itself inconclusive: use the safe
+       renderer. A small number of local differences is allowed for windows
+       and sprites crossing sample points. */
+    return compared >= 6 && different * 4 <= compared;
+}
+
+static int s3d_has_color_math(const uint8_t *layers)
+{
+    if (layers)
+        for (int k = 0; k < SCHED_WIDTH * SCHED_HEIGHT; k++)
+            if (layers[k] & 8u)
+                return 1;
+    return 0;
+}
+
 void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behind,
                  const uint8_t *behind_layers, const sched_ppu_state *st, int ow, int oh,
                  int offscreen)
@@ -2734,6 +2876,11 @@ void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behi
     if (resize(ow, oh, pw, ph))
         return;
     const settings *s = &presets[cur_preset];
+    /* Furniture/sprite overlap has no reliable 3D height or pose metadata.
+       Preserve the complete console composition, including the blanket. */
+    if ((g.s3.scene && g.s3.scene->mode == CT_SCENE_UI) || (st && st->mode == 7) ||
+        (s->scene3d && (s3d_field_needs_2d(g.s3.scene) || s3d_has_color_math(layers))))
+        s = &presets[HD2D_OFF];
     g.frame++;
 
     int ui_z;
@@ -2804,75 +2951,25 @@ void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behi
     bind_tex(0, g.t_color);
     bind_tex(1, g.t_layer);
 
-    /* The 3D diorama where the preset has it and the game says this is a
-       map view; else the 2D path; both while crossfading. Fading out with
-       no scene left (a battle starting), the last 3D frame stays. */
+    /* The 3D diorama is allowed only when its map agrees with the console's
+       visible BG pixels. A missing or mismatched scene goes straight to 2D;
+       fading an old 3D frame would briefly show the wrong map. */
     const ct_scene *sc = g.s3.scene;
-    int want3 = s->scene3d && g.s3.ok && sc &&
-                (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD) && sc->vram &&
-                /* port: a field nobody controls (the title's opening scenes:
-                   the sky, the flying machine, scrolling layers drawn as a
-                   map) stays the console's picture; it came out scrambled */
-                (sc->mode != CT_SCENE_FIELD || sc->player < sc->n_objects) &&
-                !(st && st->mode == 7) &&
-                /* the map's layers (BG1, BG2) on neither screen: the
-                   console shows something else over a loaded map (a
-                   black screen with text), so the 3D view would show a
-                   map nobody sees */
-                !(st && !((st->main_enabled | st->sub_enabled) & 3));
-    /* port: a map view that drops out for a few frames (seen on the world
-       map's bridges) stays 3D: only 8 frames in a row without it fade the
-       3D view out; before, each dropped frame cut to the 2D picture and the
-       view flicked between the two. Logged, for finding out why. */
-    {
-        static int off_run, logged;
-        if (want3 || !sc) {
-            off_run = 0;
-        } else if (g.s3.amt > 0.0f && ++off_run < 8) {
-            if (logged < 20) {
-                fprintf(stderr, "hd2d: 3D dropped a frame: mode %d, bg %x/%x, ppu mode %d\n",
-                        sc->mode, st ? st->main_enabled : 0, st ? st->sub_enabled : 0,
-                        st ? st->mode : -1);
-                logged++;
-            }
-            want3 = (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD) && sc->vram;
-        }
-    }
-    /* port: back from a battle, the map settles first: the game says it
-       is a map view a moment before its tiles are all back in video
-       memory, and the 3D view, which reads them from there, showed the
-       battle's graphics scrambled for a second. After a long stretch of
-       something else (half a second or more: a battle, not a door or a
-       fade), the console's own picture until the map view has lasted 2/3
-       of a second; then the 3D fades in. Doors and room changes (the game
-       fades to black over its loading) go straight on as before. */
-    {
-        static int away, stable, settling;
-        static uint32_t eh_left;   /* the map's tiles as it was left */
-        int map_view = sc && sc->vram && (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD);
-        if (!map_view) {
-            stable = 0;
-            if (++away >= 30)
-                settling = 1;
-        } else {
-            away = 0;
-            stable = stable < 1000 ? stable + 1 : stable;
-            uint32_t eh = s3d_chr_hash(sc);
-            /* the same tiles as before (a menu closed): no wait */
-            if (stable >= 40 || (settling && eh == eh_left && stable >= 2))
-                settling = 0;
-            if (!settling)
-                eh_left = eh;
-        }
-        if (want3 && settling && g.s3.amt <= 0.0f)
-            want3 = 0;
-    }
-    if (!s->scene3d || (!want3 && (g.s3.pic_w != pw || g.s3.pic_h != ph)))
+    int scene_candidate = s->scene3d && g.s3.ok && sc &&
+                         (sc->mode == CT_SCENE_FIELD || sc->mode == CT_SCENE_WORLD) && sc->vram &&
+                         !s3d_scene_exact_2d(sc) &&
+                         !(st && st->mode == 7) &&
+                         (sc->mode != CT_SCENE_FIELD || sc->player < sc->n_objects) &&
+                         !(st && !((st->main_enabled | st->sub_enabled) & 3));
+    int scene_matches = scene_candidate && s3d_scene_matches_console(sc, bgrx, layers, st, ui_z);
+    int want3 = scene_candidate && scene_matches;
+    int focus_change = 0;
+    float aperture = s3d_focus_step(&g.s3.focus, sc, want3, &focus_change);
+    if (focus_change & S3D_SCENE_CUT)
         g.s3.amt = 0.0f;
-    else
-        g.s3.amt = want3 ? fminf(g.s3.amt + S3D_FADE_STEP, 1.0f)
-                         : fmaxf(g.s3.amt - S3D_FADE_STEP, 0.0f);
+    g.s3.amt = s->scene3d && want3 ? fminf(g.s3.amt + S3D_FADE_STEP, 1.0f) : 0.0f;
     float amt3 = g.s3.amt;
+    int world2d = sc && sc->mode == CT_SCENE_WORLD;
 
     if (amt3 < 1.0f)
         light_pass(s, ui_z, scene_amt);
@@ -2890,22 +2987,34 @@ void hd2d_render(const uint8_t *bgrx, const uint8_t *layers, const uint8_t *behi
     if (amt3 < 1.0f) {
         /* 2: the upscale into two planes, with the tilt: worked out in the
            passes that read the picture (bind_picture). */
-        float tilt = have_behind ? s->tilt * scene_amt * field_amt : 0.0f;
+        float tilt = have_behind && !world2d ? s->tilt * scene_amt * field_amt : 0.0f;
         /* Depth of field settings, shared by passes 3 and 5. */
-        float dof_tilt = s->dof_tilt * scene_amt * field_amt;
-        float dof_depth = s->dof_depth * scene_amt * field_amt;
-        post(s, px, py, pw, ph, ow, oh, offscreen, tilt, dof_tilt, dof_depth, osd_alpha, 0, 0.0f);
+        float dof_tilt = world2d ? 0.0f : s->dof_tilt * scene_amt * field_amt;
+        float dof_depth = world2d ? 0.0f : s->dof_depth * scene_amt * field_amt;
+        post(s, px, py, pw, ph, ow, oh, offscreen, tilt, dof_tilt, dof_depth, osd_alpha, 0,
+             0.0f, 1.0f);
     }
     if (amt3 > 0.0f) {
         if (want3)
             s3d_box_mask(sc, bgrx, layers, ui_z);
-        if (want3 && s3d_render(sc, s, pw, ph, ui_z, scene_amt))
-            g.s3.amt = 0.0f;   /* no target: the 2D path from the next frame */
-        else
+        if (want3 && s3d_render(sc, s, pw, ph, ui_z, scene_amt)) {
+            g.s3.amt = 0.0f;
+            s3d_focus_step(&g.s3.focus, NULL, 0, NULL);
+            /* Allocation failure must also replace a fully opaque 3D frame
+               immediately; no 2D pass was drawn above when amt3 was 1. */
+            if (amt3 >= 1.0f) {
+                light_pass(s, ui_z, scene_amt);
+                float tilt = have_behind && !world2d ? s->tilt * scene_amt * field_amt : 0.0f;
+                post(s, px, py, pw, ph, ow, oh, offscreen, tilt,
+                     world2d ? 0.0f : s->dof_tilt * scene_amt * field_amt,
+                     world2d ? 0.0f : s->dof_depth * scene_amt * field_amt, osd_alpha, 0, 0.0f,
+                     1.0f);
+            }
+        } else
             /* Real depth now: the tilt-shift band only a little, the depth
                term doing most of the blur. */
             post(s, px, py, pw, ph, ow, oh, offscreen, 0.0f, s->dof_tilt * 0.25f * scene_amt,
-                 0.9f * scene_amt, osd_alpha, 1, amt3);
+                 0.9f * scene_amt, osd_alpha, 1, amt3, aperture);
     }
     prof.frame[prof.slot] = g.frame;
     prof.submit_ms[prof.slot] = ms_since(tc);

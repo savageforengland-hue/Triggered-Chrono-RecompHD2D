@@ -95,6 +95,22 @@ static vpad attach(uint16_t vid, uint16_t pid, const char *name)
     v.pad = SDL_GameControllerOpen(v.idx);
     v.joy = v.pad ? SDL_GameControllerGetJoystick(v.pad) : NULL;
     CHECK(v.pad && v.joy, "open %s: %s", name, SDL_GetError());
+    /* SDL2's automatic virtual-pad mapping omits the touchpad on some
+       releases. Our fixture declares that button, so map it explicitly. */
+    if (v.pad && !SDL_GameControllerHasButton(v.pad, SDL_CONTROLLER_BUTTON_TOUCHPAD)) {
+        char *mapping = SDL_GameControllerMapping(v.pad);
+        if (mapping) {
+            size_t size = strlen(mapping) + 48;
+            char *complete = malloc(size);
+            if (complete) {
+                snprintf(complete, size, "%s,touchpad:b%d,", mapping,
+                         SDL_CONTROLLER_BUTTON_TOUCHPAD);
+                CHECK(SDL_GameControllerAddMapping(complete) >= 0, "map virtual touchpad");
+                free(complete);
+            }
+            SDL_free(mapping);
+        }
+    }
     return v;
 }
 

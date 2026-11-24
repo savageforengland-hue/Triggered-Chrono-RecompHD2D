@@ -19,6 +19,7 @@ int ct_world_scene(ct_scene *out);   /* world_scene.c */
 /* WRAM offsets (bank $7E unless noted; docs/SCENE.md A0). */
 enum {
     NMI_VECTOR = 0x0500,         /* JML here: the running main loop's NMI handler */
+    F_EVENT = 0x0138,            /* nonzero while an event script holds the party */
     LOCATION = 0x0100,           /* u16, 9 bits */
     LEADER = 0x0197,             /* 2 * slot, $80 none */
     L1_W = 0x0BCB, L1_H = 0x0BCD, L2_W = 0x0BCF, L2_H = 0x0BD1, L3_W = 0x0BD3, L3_H = 0x0BD5,
@@ -36,6 +37,15 @@ enum {
 /* The field loop's NMI handler (JML $C0EA63) is installed while it runs;
    battles, menus, the world map and the title install their own. */
 static const uint8_t field_nmi[4] = {0x5C, 0x63, 0xEA, 0xC0};
+/* Menu_InstallInterruptVectors: name entry, pause/save, shops and the
+   other full-screen menu views all use JML $C2840E. */
+static const uint8_t ui_nmi[4] = {0x5C, 0x0E, 0x84, 0xC2};
+/* Mode7Engine_Entry's cutscene vectors: setup/transfer and the overlay's
+   per-frame handler. Several scenes mix Mode 7, Mode 1, HDMA and overlays,
+   so the whole engine-owned shot stays console-exact. */
+static const uint8_t cutscene_nmi[][4] = {
+    {0x5C, 0x48, 0x05, 0xC3}, {0x5C, 0x29, 0x05, 0xC3}, {0x5C, 0xC9, 0x08, 0xC3},
+};
 
 /* BG character bases while the field runs ($210B = $11, $210C = $05). */
 enum { CHR_BG12 = 0x1000, CHR_BG3 = 0x5000 };
@@ -107,7 +117,18 @@ int ct_game_scene(ct_scene *out)
 {
     const uint8_t *w = bus_wram();
     out->mode = CT_SCENE_OTHER;
+    out->flags = 0;
+    out->wrap = 0;
     n_slots = 0;
+    for (size_t k = 0; k < sizeof cutscene_nmi / sizeof *cutscene_nmi; k++)
+        if (!memcmp(w + NMI_VECTOR, cutscene_nmi[k], sizeof cutscene_nmi[k])) {
+            out->flags = CT_SCENE_SCRIPTED | CT_SCENE_EXACT_2D;
+            return 0;
+        }
+    if (!memcmp(w + NMI_VECTOR, ui_nmi, sizeof ui_nmi)) {
+        out->mode = CT_SCENE_UI;
+        return 0;
+    }
     if (memcmp(w + NMI_VECTOR, field_nmi, sizeof field_nmi))
         return ct_world_scene(out);   /* the world map, or nothing */
     unsigned mw = w[L1_W] > w[L2_W] ? w[L1_W] : w[L2_W];
@@ -130,6 +151,8 @@ int ct_game_scene(ct_scene *out)
     }
 
     out->mode = CT_SCENE_FIELD;
+    if (w[F_EVENT])
+        out->flags |= CT_SCENE_SCRIPTED;
     out->cell_px = 16;
     out->map_w = (uint16_t)mw;
     out->map_h = (uint16_t)mh;

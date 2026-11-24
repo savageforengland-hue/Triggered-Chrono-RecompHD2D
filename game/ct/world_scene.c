@@ -20,9 +20,11 @@ int ct_world_scene(ct_scene *out);
 
 enum {
     NMI_VECTOR = 0x0500,
+    F_EVENT = 0x0138,            /* nonzero while an event script holds the party */
     LOCATION = 0x0100,             /* $1F0-$1F7: the world maps */
     PX_X = 0x0283, PX_Y = 0x0285,  /* the party, world px (u16) */
-    BG3_HOFS = 0x0024, BG3_VOFS = 0x002A,   /* the NMI's shadow (D = 0) */
+    BG1_HOFS = 0x0020, BG1_VOFS = 0x0026,   /* the NMI's PPU shadows (D = 0) */
+    BG3_HOFS = 0x0024, BG3_VOFS = 0x002A,
     DEFS_FG = 0x3000, DEFS_BG = 0x3800,     /* 256 metatiles x 4 tilemap words */
     MAP_FG = 0x4000, MAP_BG = 0x5800,       /* 96 x 64 metatile indices */
     PROPS = 0x7000,                /* 2 bytes per ground metatile: 4 nibbles */
@@ -124,6 +126,7 @@ int ct_world_scene(ct_scene *out)
 {
     const uint8_t *w = bus_wram();
     out->mode = CT_SCENE_OTHER;
+    out->flags = 0;
     unsigned map = u16at(w, LOCATION) & 0x1FF;
     if (memcmp(w + NMI_VECTOR, world_nmi, sizeof world_nmi) || map < 0x1F0 || map > 0x1F7)
         return -1;
@@ -146,8 +149,18 @@ int ct_world_scene(ct_scene *out)
     out->map_id = map;
     out->map_generation = generation;
     int px = (int)u16at(w, PX_X), py = (int)u16at(w, PX_Y);
-    out->camera_x = ((px - 128) % (16 * MW) + 16 * MW) % (16 * MW);
-    out->camera_y = ((py - 112) % (16 * MH) + 16 * MH) % (16 * MH);
+    /* Normally the party stays at (128,112), but the opening flyover pans
+       independently. The BG1 shadows are the console's actual view; using
+       the party here made the diorama show a different part of the map. */
+    out->camera_x = (int32_t)(u16at(w, BG1_HOFS) % (16 * MW));
+    out->camera_y = (int32_t)(u16at(w, BG1_VOFS) % (16 * MH));
+    /* During free movement the party's foot is fixed at (128,112). A
+       different relation means the event engine is panning the shot even
+       if the party itself is stationary (the opening flyover). */
+    int screen_x = (px - out->camera_x + 16 * MW) % (16 * MW);
+    int screen_y = (py - out->camera_y + 16 * MH) % (16 * MH);
+    if (w[F_EVENT] || screen_x != 128 || screen_y != 112)
+        out->flags |= CT_SCENE_SCRIPTED;
     out->cells = cells;
     out->wrap = 1;
 
@@ -193,7 +206,12 @@ int ct_world_scene(ct_scene *out)
         ey[e] = (int)(w0 >> 8);
         vis[e] = ey[e] < 224 && ex[e] > -16;   /* all pieces 16 x 16 here (OBSEL $60) */
     }
-    int sx = 128 - PARTY_OAM_DX, sy = 112 - PARTY_OAM_DY;
+    int sx = (ob->x - out->camera_x + 16 * MW) % (16 * MW) - PARTY_OAM_DX;
+    int sy = (ob->y - out->camera_y + 16 * MH) % (16 * MH) - PARTY_OAM_DY;
+    if (sx >= 16 * MW - 16)
+        sx -= 16 * MW;
+    if (sy >= 16 * MH - 32)
+        sy -= 16 * MH;
     for (int e = 0; e < 128 && ob->n_pieces < CT_SCENE_MAX_PIECES; e++)
         /* The 16 x 16 piece, and any piece on top of it (a 32 px tall pose). */
         if (vis[e] && ex[e] == sx && (ey[e] == sy || ey[e] == sy - 16)) {

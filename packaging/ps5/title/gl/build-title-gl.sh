@@ -34,7 +34,7 @@ args=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_VERBOSE_MAKEFILE=OFF -DCT_PS5_TITLE=ON
 libs=(ct_input ct_hd2d ct_packs ct_hdtext ct_menu ct_imgui ct_sched ct_interp ct_runtime
       ct_snes_vendor ct_tables_empty)
 cmake --build "$objs" -j "$(nproc)" --target "${libs[@]}"
-cmake --build "$objs" -j "$(nproc)" --target ct_sdl_engine >/dev/null 2>&1 || true   # objects only
+cmake --build "$objs" -j "$(nproc)" --target ct_sdl_engine   # checked frontend objects
 
 # The app folder: the kit, with ps5-opengl's native-app link layout.
 rm -rf "$app"

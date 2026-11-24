@@ -73,6 +73,95 @@ static ct_music_event ev(int kind, int song, int volume, int frames)
                             .volume = (uint8_t)volume, .frames = (uint16_t)frames};
 }
 
+/* MSU-1: intro at 220 Hz, looping body at 440 Hz, opposite channel polarity. */
+static void write_msu(const char *path, unsigned loop, int bad)
+{
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL, "open synthetic PCM");
+    if (!f) return;
+    fwrite(bad == 1 ? "BAD!" : "MSU1", 1, 4, f);
+    for (int k = 0; k < 4; k++) fputc((int)(loop >> (k * 8)) & 255, f);
+    for (int k = 0; k < 22050; k++) {
+        double hz = k < 11025 ? 220.0 : 440.0;
+        int v = (int)lrint(8000 * sin(2 * PI * hz * k / 44100));
+        for (int ch = 0; ch < 2; ch++) {
+            unsigned u = (unsigned)(ch ? -v : v) & 65535u;
+            fputc((int)(u & 255), f); fputc((int)(u >> 8), f);
+        }
+    }
+    if (bad == 2) fputc(0, f);
+    fclose(f);
+}
+
+static void test_msu(const char *dir)
+{
+    char path[4200];
+    snprintf(path, sizeof path, "%s/music/msu.pcm", dir);
+    write_msu(path, 11025, 0);
+    snprintf(path, sizeof path, "%s/music/bad.pcm", dir);
+    write_msu(path, 22050, 0);
+    snprintf(path, sizeof path, "%s/music/magic.pcm", dir);
+    write_msu(path, 0, 1);
+    snprintf(path, sizeof path, "%s/music/short.pcm", dir);
+    write_msu(path, 0, 2);
+    snprintf(path, sizeof path, "%s/music/tiny.pcm", dir);
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL, "open tiny PCM");
+    if (!f) return;
+    const unsigned char tiny[] = {77,83,85,49,0,0,0,0,232,3,24,252};
+    fwrite(tiny, 1, sizeof tiny, f); fclose(f);
+    snprintf(path, sizeof path, "%s/pack.toml", dir);
+    f = fopen(path, "w");
+    CHECK(f != NULL, "open MSU manifest");
+    if (!f) return;
+    fprintf(f, "[[music]]\nsong=1\nfile=\"music/msu.pcm\"\n"
+               "[[music]]\nsong=2\nfile=\"music/msu.pcm\"\nloop=false\n"
+               "[[music]]\nsong=3\nfile=\"music/msu.pcm\"\nloop_start=0\n"
+               "[[music]]\nsong=4\nfile=\"music/bad.pcm\"\n"
+               "[[music]]\nsong=5\nfile=\"music/magic.pcm\"\n"
+               "[[music]]\nsong=6\nfile=\"music/short.pcm\"\n"
+               "[[music]]\nsong=7\nfile=\"music/missing.pcm\"\n"
+               "[[music]]\nsong=8\nfile=\"music/tiny.pcm\"\n");
+    fclose(f);
+    const char *dirs[] = {dir};
+    CHECK(music_load(dirs, 1) == 8, "MSU mappings loaded");
+    ct_music_event e = ev(CT_MUSIC_FADE, 0, 255, 0);
+    music_event(&e, 0);
+    e = ev(CT_MUSIC_PLAY, 1, 0, 0); music_event(&e, 1);
+    CHECK(music_replacing(), "valid MSU replaces music");
+    render(RATE * 2);
+    CHECK(fabs(freq(buf, 2400, 9600) - 220) < 10, "MSU intro plays first");
+    CHECK(fabs(freq(buf, RATE, RATE * 2) - 440) < 5, "header loop skips intro");
+    CHECK(rms(buf, RATE, RATE * 2) > 5000, "MSU keeps playing after EOF");
+    int stereo_ok = 1;
+    for (int k = RATE; k < RATE * 2; k++)
+        if (abs(buf[2*k] + buf[2*k+1]) > 2) stereo_ok = 0;
+    CHECK(stereo_ok, "signed little-endian stereo channels retained");
+    e = ev(CT_MUSIC_FADE, 0, 0, 30); music_event(&e, 1); render(RATE);
+    CHECK(rms(buf, 30000, RATE) == 0, "MSU follows the game fade to silence");
+    e = ev(CT_MUSIC_FADE, 0, 255, 0); music_event(&e, 1);
+    music_stop();
+    e = ev(CT_MUSIC_PLAY, 2, 0, 0); music_event(&e, 2); render(RATE);
+    CHECK(rms(buf, 2400, 9600) > 5000 && rms(buf, 30000, RATE) == 0,
+          "MSU one-shot stops despite loop metadata");
+    music_stop();
+    e = ev(CT_MUSIC_PLAY, 3, 0, 0); music_event(&e, 3); render(RATE);
+    CHECK(fabs(freq(buf, 26400, 33600) - 220) < 10, "explicit zero overrides header loop");
+    music_stop();
+    e = ev(CT_MUSIC_PLAY, 8, 0, 0); music_event(&e, 3); render(4800);
+    CHECK(rms(buf, 2400, 4800) > 990, "one-frame PCM loop cannot starve mixer");
+    for (int song = 4; song <= 7; song++) {
+        music_stop();
+        e = ev(CT_MUSIC_PLAY, song, 0, 0); music_event(&e, song);
+        CHECK(!music_replacing(), "invalid/missing PCM %d keeps console music", song);
+        for (int k = 0; k < 4800; k++) buf[k] = 123;
+        music_mix(buf, 2400);
+        int unchanged = 1;
+        for (int k = 0; k < 4800; k++) unchanged &= buf[k] == 123;
+        CHECK(unchanged, "invalid PCM leaves base audio untouched");
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
@@ -201,6 +290,7 @@ int main(int argc, char **argv)
         CHECK(r > 2000 && fabs(fq - 440) < 5, "%s: RMS %.0f at %.1f Hz", argv[k], r, fq);
     }
 
+    test_msu(dir);
     music_unload();
     CHECK(!music_replacing() && music_count() == 0, "unloaded");
     return th_report("music");

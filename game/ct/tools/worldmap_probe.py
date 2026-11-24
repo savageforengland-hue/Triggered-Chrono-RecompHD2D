@@ -86,8 +86,9 @@ def exits(w):
 
 def camera(w):
     """Top-left of the 256x224 view in world px (wraps at 1536 x 1024)."""
-    px, py = u16(w, PX_X), u16(w, PX_Y)
-    return (px - 128) % (MAP_W * 16), (py - 112) % (MAP_H * 16)
+    # Usually this equals party - (128,112). During the opening flyover
+    # the view moves without the party, so the PPU shadows are authoritative.
+    return u16(w, SHADOW + 2) % (MAP_W * 16), u16(w, SHADOW + 8) % (MAP_H * 16)
 
 
 def png(path, W, H, img):
@@ -267,9 +268,14 @@ def scene_text(w, vram, oam):
     vis = [v for _, _, v in ent]
     facing = w[0x0D70 + 0x28]
     party = []
+    sx, sy = (px - cx) % 1536 - 8, (py - cy) % 1024 - 17
+    if sx >= 1520:
+        sx -= 1536
+    if sy >= 992:
+        sy -= 1024
     for e in range(128):
         x, y, _ = ent[e]
-        if vis[e] and x == 120 and y in (95, 79) and len(party) < 16:
+        if vis[e] and x == sx and y in (sy, sy - 16) and len(party) < 16:
             party.append(e)
             vis[e] = False
     objs = [(px % 1536, py % 1024, facing if facing <= 3 else -1, party)]

@@ -36,7 +36,7 @@ PATH=$(dirname "$(command -v cmake)"):$PATH "$sdk/bin/prospero-cmake" -S "$src" 
 libs=(ct_input ct_hd2d ct_packs ct_hdtext ct_menu ct_imgui ct_sched ct_interp ct_runtime
       ct_snes_vendor ct_tables_empty)
 cmake --build "$objs" -j "$(nproc)" --target "${libs[@]}"
-cmake --build "$objs" -j "$(nproc)" --target ct_sdl_engine >/dev/null 2>&1 || true   # objects only
+cmake --build "$objs" -j "$(nproc)" --target ct_sdl_engine   # checked frontend objects
 
 # One relocatable object; missing weak game hooks become NULL.
 cd "$objs"

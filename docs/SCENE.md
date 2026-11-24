@@ -64,6 +64,22 @@ CT_ROM=... ./ct_boot --frames 9200 --script ../game/ct/test/replay/leene_square.
 python3 ../game/ct/tools/scene_probe.py spike/l.wram --vram spike/l.vram --png spike/map.png --oam
 ```
 
+## Renderer cutscene context (implemented, ABI 11)
+
+`ct_scene.flags` now separates two facts that `mode` alone could not express:
+`CT_SCENE_SCRIPTED` means the game controls the current shot, while
+`CT_SCENE_EXACT_2D` means its presentation is not representable by the scene
+description. The engine clears the flags on every capture so a static scene
+cannot inherit an earlier cutscene.
+
+Chrono Trigger sets `SCRIPTED` from the field event hold (`$0138`) and from the
+party/camera relation on the world map. The special cutscene NMI vectors
+`$C30548`, `$C30529` and `$C308C9` set both flags: some handlers change video
+mode and HDMA state inside one shot, so classifying only frames where BGMODE is
+7 would make the renderer flicker between reconstructions. The renderer uses
+the scripted flag to suppress only live camera offsets, not as a generic 2D
+fallback. Details and tests are in [CUTSCENES.md](CUTSCENES.md).
+
 ## A0. Field map data
 
 ### A0.1 Map load and map-change detection

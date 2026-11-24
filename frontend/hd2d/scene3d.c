@@ -148,6 +148,8 @@ typedef struct {
     float card_shift;               /* port: s3d_params.card_shift (cards) */
     uint8_t ground_ok[MAXC][MAXC];  /* port: per quarter (bit q): the back layer's tile there
                                        has pixels and stays down (cards' ground fill) */
+    int camera_x, camera_y, camera_right, camera_bottom; /* viewport cells */
+    uint8_t room[MAXC][MAXC];       /* components visible to the console camera */
 } build_ctx;
 
 static build_ctx ctx;   /* the last build's, also for placing sprites */
@@ -167,6 +169,20 @@ void s3d_map_bounds(int *x0, int *z0, int *x1, int *z1)
     *z0 = bounds[1];
     *x1 = bounds[2];
     *z1 = bounds[3];
+}
+
+float s3d_room_zoom(float zoom)
+{
+    int w = bounds[2] - bounds[0], h = bounds[3] - bounds[1];
+    if (w <= 0 || h <= 0)
+        return zoom;
+    /* Leave one cell around the room. At most 1.25x avoids a dramatic
+       camera jump while making the small-room preset stop looking shrunk. */
+    float zx = 256.0f / (float)(w + 32), zy = 224.0f / (float)(h + 32);
+    float fit = zx < zy ? zx : zy;
+    if (fit > 1.25f)
+        fit = 1.25f;
+    return fit > zoom ? fit : zoom;
 }
 
 int s3d_height_at(int x, int z)
@@ -204,6 +220,167 @@ static uint32_t pack(const ct_scene_layer *L, uint16_t e, int normal, uint32_t f
     return tile_addr(L, e) | (uint32_t)((e >> 10) & 7) << S3D_PAL_SHIFT |
            (L->bpp == 2 ? S3D_2BPP : 0) | (uint32_t)normal << S3D_NORMAL_SHIFT |
            (e & 0x2000 ? S3D_OVERHEAD : 0) | flags;
+}
+
+static int div_floor16(int v)
+{
+    return v >= 0 ? v / 16 : -((-v + 15) / 16);
+}
+
+static int room_walkable(const build_ctx *c, int x, int y)
+{
+    return x >= 0 && y >= 0 && x < c->s->map_w && y < c->s->map_h && !c->empty[y][x] &&
+           !c->solid[y][x];
+}
+
+/* Flood every walkable component the console camera actually shows. Then
+   grow it by two cells through non-empty geometry, enough to retain walls,
+   furniture and roof runs without pulling a separate room across the void. */
+static void find_room(build_ctx *c)
+{
+    const ct_scene *s = c->s;
+    c->camera_x = div_floor16(s->camera_x);
+    c->camera_y = div_floor16(s->camera_y);
+    c->camera_right = div_floor16(s->camera_x + 255);
+    c->camera_bottom = div_floor16(s->camera_y + 223);
+    int qx[MAXC * MAXC], qy[MAXC * MAXC], head = 0, tail = 0;
+    int x0 = div_floor16(s->camera_x), y0 = div_floor16(s->camera_y);
+    int x1 = div_floor16(s->camera_x + 255), y1 = div_floor16(s->camera_y + 223);
+    if (x0 < 0)
+        x0 = 0;
+    if (y0 < 0)
+        y0 = 0;
+    if (x1 >= s->map_w)
+        x1 = s->map_w - 1;
+    if (y1 >= s->map_h)
+        y1 = s->map_h - 1;
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+            if (room_walkable(c, x, y) && !c->room[y][x]) {
+                c->room[y][x] = 1;
+                qx[tail] = x;
+                qy[tail++] = y;
+            }
+    while (head < tail) {
+        int x = qx[head], y = qy[head++];
+        static const int dx[4] = {-1, 1, 0, 0}, dy[4] = {0, 0, -1, 1};
+        for (int k = 0; k < 4; k++) {
+            int nx = x + dx[k], ny = y + dy[k];
+            if (!room_walkable(c, nx, ny) || c->room[ny][nx])
+                continue;
+            c->room[ny][nx] = 1;
+            qx[tail] = nx;
+            qy[tail++] = ny;
+        }
+    }
+    if (!tail) {   /* No classified floor: retain only geometry the console can see. */
+        for (int y = y0; y <= y1; y++)
+            for (int x = x0; x <= x1; x++)
+                c->room[y][x] = (uint8_t)!c->empty[y][x];
+        return;
+    }
+    for (int step = 0; step < 2; step++) {
+        uint8_t next[MAXC][MAXC];
+        memcpy(next, c->room, sizeof next);
+        for (int y = 0; y < s->map_h; y++)
+            for (int x = 0; x < s->map_w; x++) {
+                if (!c->room[y][x])
+                    continue;
+                for (int yy = y - 1; yy <= y + 1; yy++)
+                    for (int xx = x - 1; xx <= x + 1; xx++)
+                        if (xx >= 0 && yy >= 0 && xx < s->map_w && yy < s->map_h &&
+                            !c->empty[yy][xx])
+                            next[yy][xx] = 1;
+            }
+        memcpy(c->room, next, sizeof c->room);
+    }
+}
+
+int s3d_room_matches(const ct_scene *s)
+{
+    return ctx_ok && ctx.s == s && s->mode == CT_SCENE_FIELD &&
+           ctx.camera_x == div_floor16(s->camera_x) &&
+           ctx.camera_y == div_floor16(s->camera_y) &&
+           ctx.camera_right == div_floor16(s->camera_x + 255) &&
+           ctx.camera_bottom == div_floor16(s->camera_y + 223);
+}
+
+void s3d_camera_target(const ct_scene *s, float at[3])
+{
+    at[0] = (float)s->camera_x + 128.0f;
+    at[1] = 0.0f;
+    at[2] = (float)s->camera_y + 120.0f;
+}
+
+void s3d_camera_offsets(const ct_scene *s, float user_tilt, float user_yaw,
+                        float *tilt, float *yaw)
+{
+    int scripted = s && (s->flags & CT_SCENE_SCRIPTED);
+    if (tilt)
+        *tilt = scripted ? 0.0f : user_tilt;
+    if (yaw)
+        *yaw = scripted ? 0.0f : user_yaw;
+}
+
+int s3d_scene_exact_2d(const ct_scene *s)
+{
+    return s && (s->flags & CT_SCENE_EXACT_2D);
+}
+
+static int camera_delta(int32_t a, int32_t b, int span, int wrap)
+{
+    int64_t d = (int64_t)a - b;
+    if (d < 0)
+        d = -d;
+    if (wrap && span > 0) {
+        d %= span;
+        if (d > span / 2)
+            d = span - d;
+    }
+    return d > 0x7FFFFFFF ? 0x7FFFFFFF : (int)d;
+}
+
+float s3d_focus_step(s3d_focus_state *state, const ct_scene *s, int valid3d, int *change)
+{
+    enum { FOCUS_LAST = 11, CAMERA_CUT = 32 };
+    int changed = 0;
+    if (!state || !valid3d || !s) {
+        if (state) {
+            state->valid = 0;
+            state->frame = 0;
+        }
+        if (change)
+            *change = 0;
+        return 0.0f;
+    }
+
+    int scripted = (s->flags & CT_SCENE_SCRIPTED) != 0;
+    if (!state->valid || state->mode != s->mode || state->map_id != s->map_id)
+        changed = S3D_FOCUS_CUT | S3D_SCENE_CUT;
+    else {
+        int span_x = (int)s->map_w * s->cell_px, span_y = (int)s->map_h * s->cell_px;
+        int wraps = s->mode == CT_SCENE_WORLD && s->wrap;
+        if (state->map_generation != s->map_generation || state->scripted != scripted ||
+            camera_delta(state->camera_x, s->camera_x, span_x, wraps) > CAMERA_CUT ||
+            camera_delta(state->camera_y, s->camera_y, span_y, wraps) > CAMERA_CUT)
+            changed = S3D_FOCUS_CUT;
+    }
+
+    state->valid = 1;
+    state->mode = s->mode;
+    state->scripted = (uint8_t)scripted;
+    state->map_id = s->map_id;
+    state->map_generation = s->map_generation;
+    state->camera_x = s->camera_x;
+    state->camera_y = s->camera_y;
+    if (changed)
+        state->frame = 0;
+    else if (state->frame < FOCUS_LAST)
+        state->frame++;
+    if (change)
+        *change = changed;
+    float t = (float)state->frame / FOCUS_LAST;
+    return t * t * (3.0f - 2.0f * t);
 }
 
 /* The layers drawn as geometry, back to front: BG2, then BG1. (The third
@@ -312,8 +489,6 @@ static void flatten_ground(build_ctx *c)
 static void find_runs(build_ctx *c)
 {
     const ct_scene *s = c->s;
-    bounds[0] = bounds[1] = 1 << 20;
-    bounds[2] = bounds[3] = 0;
     memset(c->run_a, -1, sizeof c->run_a);
     memset(c->run_b, -1, sizeof c->run_b);
     memset(c->run_h, -1, sizeof c->run_h);
@@ -327,16 +502,25 @@ static void find_runs(build_ctx *c)
                     empty = tile_empty(s, L, entry_at(L, x, y, q));
             }
             c->empty[y][x] = (uint8_t)empty;
-            if (!empty) {
-                bounds[0] = x * 16 < bounds[0] ? x * 16 : bounds[0];
-                bounds[1] = y * 16 < bounds[1] ? y * 16 : bounds[1];
-                bounds[2] = x * 16 + 16 > bounds[2] ? x * 16 + 16 : bounds[2];
-                bounds[3] = y * 16 + 16 > bounds[3] ? y * 16 + 16 : bounds[3];
-            }
             c->solid[y][x] = cl->cls == CT_CELL_SOLID || cl->cls == CT_CELL_WALLISH;
             c->raised[y][x] = !empty && (c->solid[y][x] || (cl->flags & CT_CELL_OVERHEAD));
         }
     flatten_ground(c);
+    find_room(c);
+    bounds[0] = bounds[1] = 1 << 20;
+    bounds[2] = bounds[3] = 0;
+    for (int y = 0; y < s->map_h; y++)
+        for (int x = 0; x < s->map_w; x++)
+            if (c->room[y][x] && !c->empty[y][x]) {
+                if (x * 16 < bounds[0])
+                    bounds[0] = x * 16;
+                if (y * 16 < bounds[1])
+                    bounds[1] = y * 16;
+                if (x * 16 + 16 > bounds[2])
+                    bounds[2] = x * 16 + 16;
+                if (y * 16 + 16 > bounds[3])
+                    bounds[3] = y * 16 + 16;
+            }
 }
 
 static void mark_runs(build_ctx *c, int hmax)
@@ -385,7 +569,7 @@ static void mark_runs(build_ctx *c, int hmax)
 static void emit_cell(build_ctx *c, int x, int y)
 {
     const ct_scene *s = c->s;
-    if (c->empty[y][x])
+    if (c->empty[y][x] || !c->room[y][x])
         return;
     int in_run = c->run_b[y][x] >= 0, solid = c->solid[y][x];
     place fl, up;
@@ -415,13 +599,14 @@ static void emit_cell(build_ctx *c, int x, int y)
     int src = -1, sx = x;
     for (int k = 0; k < 2 && src < 0; k++) {
         int r = k == 0 ? c->run_a[y][x] - 1 : c->run_b[y][x] + 1;
-        if (r >= 0 && r < s->map_h && !c->raised[r][x] && !c->empty[r][x])
+        if (r >= 0 && r < s->map_h && c->room[r][x] && !c->raised[r][x] && !c->empty[r][x])
             src = r;
     }
     /* Else the cell beside it, west or east (a post between two others). */
     for (int k = 0; k < 2 && src < 0; k++) {
         int nx = k == 0 ? x - 1 : x + 1;
-        if (nx >= 0 && nx < s->map_w && !c->raised[y][nx] && !c->empty[y][nx]) {
+        if (nx >= 0 && nx < s->map_w && c->room[y][nx] && !c->raised[y][nx] &&
+            !c->empty[y][nx]) {
             src = y;
             sx = nx;
         }
@@ -475,7 +660,7 @@ static void emit_card_cell(build_ctx *c, int x, int y)
                     for (int dx = -3; dx <= 3; dx++) {
                         int nx = x + dx, ny = y + dy;
                         if (nx < 0 || ny < 0 || nx >= s->map_w || ny >= s->map_h ||
-                            !(c->ground_ok[ny][nx] & (1u << q)))
+                            !c->room[ny][nx] || !(c->ground_ok[ny][nx] & (1u << q)))
                             continue;
                         uint16_t ne = entry_at(L, nx, ny, q);
                         int k = 0;
@@ -555,6 +740,10 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
         return 0;
     int hmax = p->hmax < 1 ? 1 : p->hmax > HMAX_CAP ? HMAX_CAP : p->hmax;
     find_runs(c);
+    for (int y = 0; y < s->map_h; y++)
+        for (int x = 0; x < s->map_w; x++)
+            if (!c->room[y][x])
+                c->raised[y][x] = 0;
     c->card_shift = p->card_shift > 0.0f ? p->card_shift : 1.0f;
     if (p->cards) {
         const ct_scene_layer *B = layer_of(s, draw_layers[0]);
@@ -569,6 +758,14 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
         memset(box_b, -1, sizeof box_b);
     } else
         mark_runs(c, hmax);
+    /* Hidden rooms must not affect side-wall heights at the active room's
+       boundary. The visible neighbor remains, so its closing face is made. */
+    for (int y = 0; y < s->map_h; y++)
+        for (int x = 0; x < s->map_w; x++)
+            if (!c->room[y][x]) {
+                box_h[y][x] = 0;
+                box_b[y][x] = -1;
+            }
 
     /* Two passes over the cells: floor quads first, then raised ones, so
        the shadow pass can draw only the second range. */
@@ -577,7 +774,9 @@ int s3d_build_map(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
     c->m = &tmp;
     for (int y = 0; y < s->map_h; y++)
         for (int x = 0; x < s->map_w; x++)
-            if (!cell_hook || !cell_hook(cell_hook_user, s, x, y, &tmp)) {
+            if (!c->room[y][x])
+                continue;
+            else if (!cell_hook || !cell_hook(cell_hook_user, s, x, y, &tmp)) {
                 if (p->cards)
                     emit_card_cell(c, x, y);
                 else
@@ -629,6 +828,32 @@ static int oam_visible(const ct_scene *s, int e, int *x, int *y, int *size)
     if (*y + *size > 256)
         *y -= 256;   /* wraps to the top */
     return *x > -*size && *x < 256;
+}
+
+/* A blocked cell under a visible actor may be furniture (the sleeping
+   character and blanket), not a wall. Without surface/pose metadata the
+   upright billboard and extruded tile cannot preserve console occlusion.
+   Keep the entire frame flat; width alone is not a reliable pose classifier. */
+int s3d_field_needs_2d(const ct_scene *s)
+{
+    if (!s || s->mode != CT_SCENE_FIELD || !s->cells || !s->oam ||
+        s->map_w > MAXC || s->map_h > MAXC)
+        return 0;
+    for (int k = 0; k < s->n_objects && k < CT_SCENE_MAX_OBJECTS; k++) {
+        const ct_scene_object *o = &s->object[k];
+        int cx = div_floor16(o->x), cy = div_floor16(o->y);
+        if (cx < 0 || cy < 0 || cx >= s->map_w || cy >= s->map_h)
+            continue;
+        const ct_scene_cell *cell = &s->cells[cy * CT_SCENE_MAX_CELLS + cx];
+        if (cell->cls != CT_CELL_SOLID && cell->cls != CT_CELL_WALLISH)
+            continue;
+        for (int j = 0; j < o->n_pieces && j < CT_SCENE_MAX_PIECES; j++) {
+            int x, y, size;
+            if (oam_visible(s, o->piece[j] & 127, &x, &y, &size))
+                return 1;
+        }
+    }
+    return 0;
 }
 
 /* One OAM entry as 8x8 quads standing upright at world z = foot_z: a
@@ -695,7 +920,108 @@ static void emit_piece(const ct_scene *s, s3d_mesh *m, int e, float foot_z, floa
         }
 }
 
-static int build_sprites_pass(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
+typedef struct {
+    float ox, oy, kx, ky, depth;
+    int valid;
+} sprite_grid;
+
+static float dot3(const float a[3], const float b[3])
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static int sprite_grid_at(const s3d_view *v, const s3d_params *p, const float foot[3],
+                          float source_x, float source_y, sprite_grid *g)
+{
+    float rel[3] = {foot[0] - v->eye[0], foot[1] - v->eye[1], foot[2] - v->eye[2]};
+    float d = dot3(rel, v->fwd);
+    if (d <= v->near || v->focal <= 0.0f)
+        return 0;
+    float sx = 0.5f * v->w + v->focal * dot3(rel, v->right) / d;
+    float sy = 0.5f * v->h - v->focal * dot3(rel, v->up) / d;
+    float k = floorf(v->focal / d + 0.5f);
+    k = k < 1.0f ? 1.0f : k > 32.0f ? 32.0f : k;
+    float sin_tilt = fabsf(v->up[1]);
+    float cos_tilt = sqrtf(fmaxf(0.0f, 1.0f - sin_tilt * sin_tilt));
+    float normal_stretch = sin_tilt > 0.1f ? cos_tilt / sin_tilt : 1.4f;
+    normal_stretch = normal_stretch < 1.0f ? 1.0f : normal_stretch > 1.4f ? 1.4f : normal_stretch;
+    float ky = floorf(k * p->stretch / normal_stretch + 0.5f);
+    ky = ky < 1.0f ? 1.0f : ky > 32.0f ? 32.0f : ky;
+    g->kx = k;
+    g->ky = ky;
+    g->depth = d;
+    g->ox = floorf(sx + 0.5f) - source_x * k;
+    g->oy = floorf(sy + 0.5f) - source_y * ky;
+    g->valid = 1;
+    return 1;
+}
+
+static void sprite_unproject(const s3d_view *v, float x, float y, float d, float out[3])
+{
+    float a = (x - 0.5f * (float)v->w) / v->focal;
+    float b = (0.5f * (float)v->h - y) / v->focal;
+    for (int k = 0; k < 3; k++)
+        out[k] = v->eye[k] + d * (v->fwd[k] + a * v->right[k] + b * v->up[k]);
+}
+
+static void emit_piece_grid(const ct_scene *s, s3d_mesh *m, int e, const s3d_view *v,
+                            const sprite_grid *g)
+{
+    int x, y, size;
+    if (spr_pass >= 0 && prio3(s, e) != spr_pass)
+        return;
+    if (!oam_visible(s, e, &x, &y, &size))
+        return;
+    uint16_t w1 = s->oam[2 * e + 1];
+    int hf = (w1 >> 14) & 1, vf = (w1 >> 15) & 1, n = size / 8;
+    uint32_t base = s->obj_chr[(w1 >> 8) & 1], pal = (w1 >> 9) & 7;
+    float d = g->depth - (float)(127 - e) * 0.01f;
+    if (d <= v->near)
+        return;
+    for (int ty = 0; ty < n; ty++)
+        for (int tx = 0; tx < n; tx++) {
+            int col = (hf ? n - 1 - tx : tx) * 8, row = (vf ? n - 1 - ty : ty) * 8;
+            int used = ((((w1 & 0xFF) >> 4) + (row >> 3)) << 4) | (((w1 & 0xF) + (col >> 3)) & 0xF);
+            uint32_t addr = (base + (uint32_t)used * 16) & S3D_ADDR_MASK;
+            float x0 = floorf(g->ox + (float)(x + tx * 8) * g->kx + 0.5f);
+            float x1 = floorf(g->ox + (float)(x + tx * 8 + 8) * g->kx + 0.5f);
+            float y0 = floorf(g->oy + (float)(y + ty * 8) * g->ky + 0.5f);
+            float y1 = floorf(g->oy + (float)(y + ty * 8 + 8) * g->ky + 0.5f);
+            float c[4][3];
+            sprite_unproject(v, x0, y0, d, c[0]);
+            sprite_unproject(v, x1, y0, d, c[1]);
+            sprite_unproject(v, x0, y1, d, c[2]);
+            sprite_unproject(v, x1, y1, d, c[3]);
+            s3d_emit_corners(m, c,
+                             addr | pal << S3D_PAL_SHIFT | S3D_OBJ |
+                                 (uint32_t)S3D_N_SPRITE << S3D_NORMAL_SHIFT | S3D_RAISED,
+                             hf, vf);
+        }
+}
+
+static void emit_image_grid(s3d_mesh *m, const s3d_sprite_image *im, int e,
+                            const s3d_view *v, const sprite_grid *g)
+{
+    float d = g->depth - (float)(127 - e) * 0.01f;
+    if (d <= v->near)
+        return;
+    float x0 = floorf(g->ox + (float)im->x * g->kx + 0.5f);
+    float x1 = floorf(g->ox + (float)(im->x + im->w) * g->kx + 0.5f);
+    float y0 = floorf(g->oy + (float)im->y * g->ky + 0.5f);
+    float y1 = floorf(g->oy + (float)(im->y + im->h) * g->ky + 0.5f);
+    float c[4][3];
+    sprite_unproject(v, x0, y0, d, c[0]);
+    sprite_unproject(v, x1, y0, d, c[1]);
+    sprite_unproject(v, x0, y1, d, c[2]);
+    sprite_unproject(v, x1, y1, d, c[3]);
+    s3d_emit_corners(m, c,
+                     (im->tile & (S3D_PACKED | S3D_ENTRY_MASK)) | S3D_OBJ |
+                         (uint32_t)S3D_N_SPRITE << S3D_NORMAL_SHIFT | S3D_RAISED,
+                     im->hflip, im->vflip);
+}
+
+static int build_sprites_pass(const ct_scene *s, const s3d_params *p, const s3d_view *v,
+                           s3d_mesh *m)
 {
     if (s->mode != CT_SCENE_FIELD || !s->oam || !s->vram)
         return 0;
@@ -711,6 +1037,7 @@ static int build_sprites_pass(const ct_scene *s, const s3d_params *p, s3d_mesh *
        figure disjointed. A part: its box mostly (60%) inside a bigger
        object's box, its bottom not below that one's. */
     int all_box[CT_SCENE_MAX_OBJECTS][4], all_ok[CT_SCENE_MAX_OBJECTS];
+    sprite_grid ob_grid[CT_SCENE_MAX_OBJECTS] = {0};
     for (int k = 0; k < s->n_objects && k < CT_SCENE_MAX_OBJECTS; k++) {
         const ct_scene_object *o = &s->object[k];
         int bx0 = 100000, by0 = 100000, bx1 = -100000, by1 = -100000;
@@ -792,23 +1119,36 @@ static int build_sprites_pass(const ct_scene *s, const s3d_params *p, s3d_mesh *
             foot_z += up;
             base_y = up;
         }
+        sprite_grid grid = {0};
+        if (v) {
+            float foot[3] = {(float)o->x, base_y, foot_z};
+            sprite_grid_at(v, p, foot, (float)(o->x - s->camera_x), (float)foot_sy + lift, &grid);
+        }
         s3d_sprite_image im;
         if (sprite_hook && (prio == 3) == spr_pass && sprite_hook(sprite_hook_user, s, k, &im)) {
-            /* one quad for the whole picture, where its entries would be */
-            float st = p->stretch, h = (float)(foot_sy - im.y) + lift;
-            float tl[3] = {(float)(s->camera_x + im.x), base_y + h * st,
-                           foot_z + (float)(127 - o->piece[0]) * 0.004f};
-            const float U[3] = {(float)im.w / 8.0f, 0, 0}, V[3] = {0, -st * (float)im.h / 8.0f, 0};
-            s3d_emit(m, tl, U, V,
-                     (im.tile & (S3D_PACKED | S3D_ENTRY_MASK)) | S3D_OBJ |
-                         (uint32_t)S3D_N_SPRITE << S3D_NORMAL_SHIFT | S3D_RAISED,
-                     im.hflip, im.vflip);
+            if (grid.valid)
+                emit_image_grid(m, &im, o->piece[0], v, &grid);
+            else {
+                /* one quad for the whole picture, where its entries would be */
+                float st = p->stretch, h = (float)(foot_sy - im.y) + lift;
+                float tl[3] = {(float)(s->camera_x + im.x), base_y + h * st,
+                               foot_z + (float)(127 - o->piece[0]) * 0.004f};
+                const float U[3] = {(float)im.w / 8.0f, 0, 0};
+                const float V[3] = {0, -st * (float)im.h / 8.0f, 0};
+                s3d_emit(m, tl, U, V,
+                         (im.tile & (S3D_PACKED | S3D_ENTRY_MASK)) | S3D_OBJ |
+                             (uint32_t)S3D_N_SPRITE << S3D_NORMAL_SHIFT | S3D_RAISED,
+                         im.hflip, im.vflip);
+            }
             for (int j = 0; j < o->n_pieces; j++)
                 owned[o->piece[j] & 127] = 1;
             continue;
         }
         for (int j = 0; j < o->n_pieces; j++) {
-            emit_piece(s, m, o->piece[j], foot_z, base_y, foot_sy, lift, p->stretch);
+            if (grid.valid)
+                emit_piece_grid(s, m, o->piece[j], v, &grid);
+            else
+                emit_piece(s, m, o->piece[j], foot_z, base_y, foot_sy, lift, p->stretch);
             owned[o->piece[j] & 127] = 1;
         }
         int bx0 = 100000, by0 = 100000, bx1 = -100000;
@@ -826,6 +1166,7 @@ static int build_sprites_pass(const ct_scene *s, const s3d_params *p, s3d_mesh *
         ob_box[ob_n][3] = bottom;
         ob_foot[ob_n] = foot_sy;
         ob_z[ob_n] = foot_z;
+        ob_grid[ob_n] = grid;
         ob_base[ob_n++] = base_y;
     }
     /* The rest (effects, markers): each stands at its own bottom edge. */
@@ -845,8 +1186,21 @@ static int build_sprites_pass(const ct_scene *s, const s3d_params *p, s3d_mesh *
             }
         }
         if (best >= 0) {
+            if (v && ob_grid[best].valid) {
+                emit_piece_grid(s, m, e, v, &ob_grid[best]);
+                continue;
+            }
             emit_piece(s, m, e, ob_z[best], ob_base[best], ob_foot[best], 0.0f, p->stretch);
             continue;
+        }
+        if (v) {
+            float foot[3] = {(float)(s->camera_x + x), 0.0f, (float)(s->camera_y + y + size)};
+            sprite_grid grid = {0};
+            sprite_grid_at(v, p, foot, (float)x, (float)(y + size), &grid);
+            if (grid.valid) {
+                emit_piece_grid(s, m, e, v, &grid);
+                continue;
+            }
         }
         emit_piece(s, m, e, (float)(s->camera_y + y + size), 0.0f, y + size, 0.0f, p->stretch);
     }
@@ -856,14 +1210,16 @@ static int build_sprites_pass(const ct_scene *s, const s3d_params *p, s3d_mesh *
 /* The sprites, those under OAM priority 3 first: m->ni_floor indices are
    theirs (the renderer draws the map's overhead tiles between the two,
    as the console's priorities do). */
-int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
+int s3d_build_sprites_view(const ct_scene *s, const s3d_params *p, const s3d_view *v,
+                           s3d_mesh *m)
 {
     m->nv = m->ni = m->ni_floor = 0;
     oom = 0;
+    n_blobs = 0;
     if (s->mode != CT_SCENE_FIELD || !s->oam || !s->vram)
         return 0;
     for (spr_pass = 0; spr_pass < 2; spr_pass++) {
-        build_sprites_pass(s, p, m);
+        build_sprites_pass(s, p, v, m);
         if (spr_pass == 0)
             m->ni_floor = m->ni;
     }
@@ -924,4 +1280,9 @@ int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
         n_blobs++;
     }
     return oom ? -1 : m->ni / 6;
+}
+
+int s3d_build_sprites(const ct_scene *s, const s3d_params *p, s3d_mesh *m)
+{
+    return s3d_build_sprites_view(s, p, NULL, m);
 }

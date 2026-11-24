@@ -35,6 +35,10 @@ enum { MW = 6, MH = 8, WALL_X = 2, RUN_A = 1, RUN_B = 4 };
 static void make_scene_tiles(ct_scene *s, int wall_tile)
 {
     memset(s, 0, sizeof *s);
+    memset(vram, 0, sizeof vram);
+    memset(tiles, 0, sizeof tiles);
+    memset(cells, 0, sizeof cells);
+    memset(oam, 0, sizeof oam);
     /* Tiles 1 (ground) and 2 (wall) at character base $1000 have pixels;
        tile 0 is empty. */
     for (int k = 0; k < 16; k++) {
@@ -86,7 +90,7 @@ static void test_map(void)
     static ct_scene s;
     make_scene(&s);
     s3d_mesh m = {0};
-    s3d_params p = {3, 1.0f};
+    s3d_params p = {.hmax = 3, .stretch = 1.0f};
     int quads = s3d_build_map(&s, &p, &m);
     /* Floors: 44 free cells, plus 3 run rows not under the box, filled
        from the ground north of the run; raised: the 4 run cells; sides: 3
@@ -126,7 +130,7 @@ static void test_ground_stays_flat(void)
     static ct_scene s;
     make_scene_tiles(&s, 1);
     s3d_mesh m = {0};
-    s3d_params p = {3, 1.0f};
+    s3d_params p = {.hmax = 3, .stretch = 1.0f};
     int quads = s3d_build_map(&s, &p, &m);
     CHECK(quads == MW * MH * 4 && m.ni_floor / 6 == quads, "all floor: %d quads, %d floor", quads,
           m.ni_floor / 6);
@@ -146,7 +150,7 @@ static void test_cards(void)
         for (int y = 2 * RUN_A; y < 2 * RUN_A + 2; y++)
             tiles[1][y * CT_SCENE_STRIDE + x] |= 0x2000;
     s3d_mesh m = {0};
-    s3d_params p = {3, 1.0f, 1};
+    s3d_params p = {.hmax = 3, .stretch = 1.0f, .cards = 1};
     int quads = s3d_build_map(&s, &p, &m);
     /* Every cell flat on the ground, plus the canopy cell's card. */
     CHECK(quads == (MW * MH + 1) * 4, "card quads %d", quads);
@@ -164,6 +168,70 @@ static void test_cards(void)
     s3d_mesh_free(&m);
     for (int k = 0; k < CT_SCENE_STRIDE * 2 * CT_SCENE_MAX_CELLS; k++)
         tiles[1][k] &= (uint16_t)~0x2000;
+}
+
+static void test_disconnected_rooms(void)
+{
+    enum { RW = 32, RH = 8, ROOM_W = 6, ROOM_H = 6, ROOM_B_X = 24 };
+    static ct_scene s;
+    memset(&s, 0, sizeof s);
+    memset(vram, 0, sizeof vram);
+    memset(tiles, 0, sizeof tiles);
+    memset(cells, 0, sizeof cells);
+    for (int k = 0; k < 16; k++)
+        vram[0x1000 + 16 + k] = 0x8181;
+    for (int room = 0; room < 2; room++) {
+        int rx = room ? ROOM_B_X : 1;
+        for (int y = 1; y <= ROOM_H; y++)
+            for (int x = rx; x < rx + ROOM_W; x++) {
+                for (int qy = 0; qy < 2; qy++)
+                    for (int qx = 0; qx < 2; qx++)
+                        tiles[1][(2 * y + qy) * CT_SCENE_STRIDE + 2 * x + qx] = 1;
+                cells[y * CT_SCENE_MAX_CELLS + x].cls = CT_CELL_FLOOR;
+            }
+    }
+    s.mode = CT_SCENE_FIELD;
+    s.cell_px = 16;
+    s.map_w = RW;
+    s.map_h = RH;
+    for (int l = 0; l < CT_SCENE_LAYERS; l++)
+        s.layer[l] = (ct_scene_layer){l < 2, 4, 0x1000, 0, tiles[l]};
+    s.cells = cells;
+    s.vram = vram;
+    s.cgram = cgram;
+    s.oam = oam;
+
+    s3d_mesh m = {0};
+    s3d_params p = {.hmax = 3, .stretch = 1.0f};
+    int quads = s3d_build_map(&s, &p, &m);
+    int x0, y0, x1, y1;
+    s3d_map_bounds(&x0, &y0, &x1, &y1);
+    CHECK(quads == ROOM_W * ROOM_H * 4, "first-room quads %d", quads);
+    CHECK(x0 == 16 && y0 == 16 && x1 == 112 && y1 == 112, "first bounds %d %d %d %d",
+          x0, y0, x1, y1);
+    CHECK(s3d_room_matches(&s), "first room should still match");
+    CHECK(fabsf(s3d_room_zoom(0.75f) - 1.25f) < 0.001f, "small-room zoom %.2f",
+          s3d_room_zoom(0.75f));
+
+    s.camera_x = 1;
+    CHECK(!s3d_room_matches(&s), "right edge entering a cell must invalidate the mesh");
+    s.camera_x = 128;   /* the transition gap contains no walkable cells */
+    CHECK(!s3d_room_matches(&s), "camera movement must invalidate the room");
+    s.camera_x = 256;
+    CHECK(!s3d_room_matches(&s), "second room should request a rebuild");
+    quads = s3d_build_map(&s, &p, &m);
+    s3d_map_bounds(&x0, &y0, &x1, &y1);
+    CHECK(quads == ROOM_W * ROOM_H * 4, "second-room quads %d", quads);
+    CHECK(x0 == ROOM_B_X * 16 && y0 == 16 && x1 == (ROOM_B_X + ROOM_W) * 16 && y1 == 112,
+          "second bounds %d %d %d %d", x0, y0, x1, y1);
+    CHECK(s3d_room_matches(&s), "second room should match after rebuild");
+    /* PS5's default layered-card renderer must exclude the other room too. */
+    p.cards = 1;
+    quads = s3d_build_map(&s, &p, &m);
+    CHECK(quads == ROOM_W * ROOM_H * 4, "card room quads %d", quads);
+    for (int k = 0; k < m.nv; k++)
+        CHECK(m.v[k].x >= ROOM_B_X * 16 - 0.1f, "hidden room leaked into cards");
+    s3d_mesh_free(&m);
 }
 
 static void test_sprites(void)
@@ -190,7 +258,7 @@ static void test_sprites(void)
     s.n_objects = 1;
     s.object[0] = (ct_scene_object){.x = 148, .y = 274, .facing = 1, .n_pieces = 1, .piece = {3}};
     s3d_mesh m = {0};
-    s3d_params p = {3, 1.0f};
+    s3d_params p = {.hmax = 3, .stretch = 1.0f};
     int quads = s3d_build_sprites(&s, &p, &m);
     /* 4 pieces, the unowned one, and the object's contact shadow (last). */
     CHECK(quads == 4 + 1 + 1 && s3d_sprite_blobs() == 1, "sprite quads %d", quads);
@@ -201,6 +269,47 @@ static void test_sprites(void)
     CHECK(has_vertex(&m, 110, 8, 228.0f + 118 * 0.004f), "unowned piece");
     CHECK((m.v[0].tile & S3D_OBJ) && ((m.v[0].tile >> S3D_NORMAL_SHIFT) & 7) == S3D_N_SPRITE,
           "sprite flags");
+    s3d_mesh_free(&m);
+}
+
+static void test_snapped_priority(void)
+{
+    static ct_scene s;
+    make_scene(&s);
+    for (int e = 0; e < 128; e++)
+        oam[2 * e] = 0xF000;
+    /* One low-priority owned sprite, a high-priority attached effect,
+       and a high-priority independent sprite. Each must be emitted once. */
+    oam[0] = 32 << 8 | 24;
+    oam[1] = 1;
+    oam[2] = 32 << 8 | 24;
+    oam[3] = 0x3002;
+    oam[4] = 80 << 8 | 64;
+    oam[5] = 0x3001;
+    s.n_objects = 1;
+    s.object[0] = (ct_scene_object){.x = 28, .y = 40, .n_pieces = 1, .piece = {0}};
+    s3d_params p = {.hmax = 3, .stretch = 1, .cards = 1};
+    s3d_mesh m = {0};
+    s3d_build_map(&s, &p, &m);
+    s3d_view v = {.eye = {48.2f, 100, 150}, .fwd = {0, -0.6f, -0.8f},
+                 .right = {1, 0, 0}, .up = {0, 0.8f, -0.6f},
+                 .focal = 300, .near = 1, .w = 768, .h = 672};
+    CHECK(s3d_build_sprites_view(&s, &p, &v, &m) == 4, "three sprites plus one shadow");
+    CHECK(m.ni_floor == 6, "only the low-priority sprite precedes the canopy");
+    CHECK(s3d_sprite_blobs() == 1, "contact shadow preserved");
+    CHECK((m.v[0].tile & S3D_ADDR_MASK) == 0x1010u, "low-priority sprite first");
+    CHECK((m.v[4].tile & S3D_ADDR_MASK) == 0x1020u, "attached effect after canopy");
+    for (int k = 0; k < 12 && k < m.nv; k++) {
+        float dx = m.v[k].x - v.eye[0], dy = m.v[k].y - v.eye[1], dz = m.v[k].z - v.eye[2];
+        float d = dy * v.fwd[1] + dz * v.fwd[2];
+        float x = v.w * 0.5f + v.focal * dx / d;
+        float y = v.h * 0.5f - v.focal * (dy * v.up[1] + dz * v.up[2]) / d;
+        CHECK(fabsf(x - roundf(x)) < 0.001f && fabsf(y - roundf(y)) < 0.001f,
+              "sprite corner off pixel grid: %f %f", x, y);
+    }
+    s.mode = CT_SCENE_OTHER;
+    CHECK(s3d_build_sprites_view(&s, &p, &v, &m) == 0 && s3d_sprite_blobs() == 0,
+          "empty scene clears contact shadow count");
     s3d_mesh_free(&m);
 }
 
@@ -325,13 +434,108 @@ static void test_world(void)
     s3d_mesh_free(&m);
 }
 
+static void test_composition_and_camera(void)
+{
+    static ct_scene s;
+    make_scene(&s);
+    memset(oam, 0, sizeof oam);
+    s.n_objects = 1;
+    s.object[0] = (ct_scene_object){.x = WALL_X * 16, .y = RUN_A * 16,
+                                   .n_pieces = 1, .piece = {0}};
+    oam[0] = 16 << 8 | 32;
+    CHECK(s3d_field_needs_2d(&s), "blocked furniture must preserve console composition");
+    s.object[0].x = 16;
+    CHECK(!s3d_field_needs_2d(&s), "ordinary floor actor stays 3D");
+    s.object[0].x = WALL_X * 16;
+    oam[0] = 240 << 8;
+    CHECK(!s3d_field_needs_2d(&s), "offscreen furniture actor must not force 2D");
+    oam[0] = 16 << 8 | 32;
+    s.mode = CT_SCENE_WORLD;
+    CHECK(!s3d_field_needs_2d(&s), "world uses its own geometry");
+    s.player = 0;
+    s.object[0].x = 999;
+    s.object[0].y = 999;
+    s.camera_x = 300;
+    s.camera_y = 500;
+    float at[3];
+    s3d_camera_target(&s, at);
+    CHECK(at[0] == 428 && at[1] == 0 && at[2] == 620,
+          "flyover follows console scroll, not the party");
+    s.camera_x += 8;
+    s3d_camera_target(&s, at);
+    CHECK(at[0] == 436, "scripted pan advances with a stationary player");
+
+    float tilt, yaw;
+    s.flags = 0;
+    s3d_camera_offsets(&s, 4.0f, -7.0f, &tilt, &yaw);
+    CHECK(tilt == 4.0f && yaw == -7.0f, "free camera keeps live offsets");
+    s.flags = CT_SCENE_SCRIPTED;
+    s3d_camera_offsets(&s, 4.0f, -7.0f, &tilt, &yaw);
+    CHECK(tilt == 0.0f && yaw == 0.0f, "scripted camera rejects live offsets");
+    CHECK(!s3d_scene_exact_2d(&s), "ordinary scripted field can remain 3D");
+    s.flags |= CT_SCENE_EXACT_2D;
+    CHECK(s3d_scene_exact_2d(&s), "transformed cutscene keeps console composition");
+
+    s3d_focus_state focus = {0};
+    int change = 0;
+    s.flags = 0;
+    s.map_id = 7;
+    s.map_generation = 3;
+    s.camera_x = 100;
+    s.camera_y = 200;
+    float aperture = s3d_focus_step(&focus, &s, 1, &change);
+    CHECK(aperture == 0.0f && change == (S3D_FOCUS_CUT | S3D_SCENE_CUT),
+          "new scene starts sharp");
+    for (int k = 0; k < 11; k++)
+        aperture = s3d_focus_step(&focus, &s, 1, &change);
+    CHECK(fabsf(aperture - 1.0f) < 0.001f && change == 0, "focus reaches target in 12 frames");
+    s.camera_x += 8;
+    aperture = s3d_focus_step(&focus, &s, 1, &change);
+    CHECK(aperture == 1.0f && change == 0, "authored pan keeps focus");
+    s.camera_x += 33;
+    aperture = s3d_focus_step(&focus, &s, 1, &change);
+    CHECK(aperture == 0.0f && change == S3D_FOCUS_CUT, "camera cut restarts focus only");
+    s.map_id++;
+    aperture = s3d_focus_step(&focus, &s, 1, &change);
+    CHECK(aperture == 0.0f && change == (S3D_FOCUS_CUT | S3D_SCENE_CUT),
+          "map cut restarts crossfade and focus");
+    s.map_generation++;
+    aperture = s3d_focus_step(&focus, &s, 1, &change);
+    CHECK(aperture == 0.0f && change == S3D_FOCUS_CUT,
+          "map content change restarts focus only");
+    s.flags = CT_SCENE_SCRIPTED;
+    aperture = s3d_focus_step(&focus, &s, 1, &change);
+    CHECK(aperture == 0.0f && change == S3D_FOCUS_CUT,
+          "script-control boundary restarts focus only");
+    CHECK(s3d_focus_step(&focus, &s, 0, &change) == 0.0f && !focus.valid,
+          "2D fallback clears cinematic focus state");
+
+    s3d_focus_state wrap_focus = {0};
+    s.mode = CT_SCENE_WORLD;
+    s.flags = 0;
+    s.wrap = 1;
+    s.map_w = 192;
+    s.map_h = 128;
+    s.cell_px = 8;
+    s.map_id = 0x1F0;
+    s.camera_x = 1535;
+    s.camera_y = 100;
+    s3d_focus_step(&wrap_focus, &s, 1, &change);
+    s.camera_x = 0;
+    aperture = s3d_focus_step(&wrap_focus, &s, 1, &change);
+    CHECK(aperture > 0.0f && change == 0, "world wrap is a one-pixel pan, not a cut");
+}
+
 int main(void)
 {
     test_map();
     test_ground_stays_flat();
     test_cards();
+    test_disconnected_rooms();
     test_sprites();
+    test_snapped_priority();
     test_world();
+    test_composition_and_camera();
     if (fails)
         return 1;
     printf("scene3d: ok\n");

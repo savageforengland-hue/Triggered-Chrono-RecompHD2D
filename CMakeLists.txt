@@ -354,7 +354,14 @@ endif()
 # The runtime and the empty function tables, no generated code; the game
 # code comes from a module loaded with --module.
 function(ct_engine_exe name)
-    add_executable(${name} ${ARGN})
+    if(CT_PS5_TITLE AND name STREQUAL "ct_sdl_engine")
+        # The native title scripts link these objects with their own CRT.
+        # Building an ELF payload here used to hide link/compiler failures
+        # behind `|| true` and could reuse incomplete frontend objects.
+        add_library(${name} OBJECT ${ARGN})
+    else()
+        add_executable(${name} ${ARGN})
+    endif()
     target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/test)
     # Whole archives: the module calls into parts of the engine the
     # program itself may not, so every engine object must be present and
@@ -495,6 +502,15 @@ add_executable(test_music test/test_music.c)
 target_link_libraries(test_music ct_packs ct_runtime)
 target_compile_options(test_music PRIVATE ${CT_WARN})
 add_test(NAME music COMMAND test_music ${CMAKE_BINARY_DIR}/test_music_tmp)
+add_test(NAME import_msu1 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/game/ct/test/test_import_msu1.py)
+add_executable(test_world_camera game/ct/test/test_world_camera.c game/ct/world_scene.c)
+target_include_directories(test_world_camera PRIVATE runtime)
+target_compile_options(test_world_camera PRIVATE ${CT_WARN} -UNDEBUG)
+add_test(NAME world_camera COMMAND test_world_camera)
+add_executable(test_cutscene_scene game/ct/test/test_cutscene_scene.c game/ct/scene.c)
+target_include_directories(test_cutscene_scene PRIVATE runtime game/ct)
+target_compile_options(test_cutscene_scene PRIVATE ${CT_WARN} -UNDEBUG)
+add_test(NAME cutscene_scene COMMAND test_cutscene_scene)
 add_test(NAME music_codecs COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_music_codecs.py
     $<TARGET_FILE:test_music> ${CMAKE_BINARY_DIR}/test_music_codecs_tmp)
 set_tests_properties(music_codecs PROPERTIES SKIP_RETURN_CODE 77)
